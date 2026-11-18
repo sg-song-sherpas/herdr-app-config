@@ -157,6 +157,17 @@ test("the status bar keeps Herdr's own contents, with the meters right after the
   assert.equal(host.ran("app.palette").length, 1);
 });
 
+test("next to the commands hint, a shortcuts button opens Herdr's list of keys", async () => {
+  host.keys = [{ section: "global", action: "app.palette", keys: "cmd-shift-p" }, { section: "global", action: "app.help", keys: "cmd-/" }];
+  const { view, cx } = await bar();
+  const s = text(view.render());
+  assert.match(s, /⌘⇧P\s*commands\s*⌘\/\s*shortcuts$/);
+  byId(view.render(), "shortcuts").handlers.on_click({}, cx);
+  assert.equal(host.ran("app.help").length, 1);
+  host.keys = [];
+  assert.match(text(view.render()), /commands\s*shortcuts$/, "unbound: just the words");
+});
+
 test("with no 5-hour limit reported, the bar shows the week alone", async () => {
   answer.usage = { code: 0, stdout: `${JSON.stringify({ ...USAGE, five_hour: null })}\n200`, stderr: "" };
   const { view } = await bar();

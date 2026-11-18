@@ -41,6 +41,7 @@ Herdr reads `~/.config/herdr-app` live, so changes show up as soon as the files 
 **Usage in the status bar.**
 - Claude's and Codex's plan usage, right after the agent count: the week, and the 5-hour window when the plan has one.
 - Click it for every limit and when each resets.
+- On the right, beside Herdr's "⌘⇧P commands", a "⌘/ shortcuts" button opens Herdr's list of keys.
 
 ## What's here
 

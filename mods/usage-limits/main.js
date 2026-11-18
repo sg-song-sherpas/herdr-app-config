@@ -184,14 +184,15 @@ export default class UsageLimits extends View {
     return this.detail ? this.popup(t, s) : this.bar(t, s);
   }
 
-  // The palette's key, as Herdr's status bar shows it ("⌘⇧P  commands").
-  hint() {
+  // A global key and what it does, as Herdr's status bar shows the
+  // palette's ("⌘⇧P  commands").
+  hint(action, word) {
     const mac = window()?.platform === "macos";
     const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
-    const b = (keys() ?? []).find((k) => k.section === "global" && k.action === "app.palette");
+    const b = (keys() ?? []).find((k) => k.section === "global" && k.action === action);
     const parts = b && b.keys.endsWith("--") ? [...b.keys.slice(0, -2).split("-"), "-"] : b?.keys.split("-");
     const key = parts && parts.map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
-    return key ? `${key}  commands` : "commands";
+    return key ? `${key}  ${word}` : word;
   }
 
   // The status bar: Herdr's (machine, branch, agents, the palette hint), with
@@ -224,7 +225,8 @@ export default class UsageLimits extends View {
         .child(group("Claude", "claude", s.claude, s.claude?.error))
         .when(Boolean(s.codex), (el) => el.child(group("Codex", "codex", s.codex, null))))
       .child(div().flex_1())
-      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint()));
+      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint("app.palette", "commands")))
+      .child(div().id("shortcuts").text_color(t.dim).cursor_pointer().on_click(() => run("app.help")).child(this.hint("app.help", "shortcuts")));
   }
 
   open(s) {
