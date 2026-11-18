@@ -15,6 +15,7 @@ Herdr reads `~/.config/herdr-app` live, so changes show up as soon as the files 
 **Sidebar (Spaces + agents).** One list instead of Herdr's separate Spaces and Agents lists.
 - Each space's agents sit under it, with their status and how long they've been in it.
 - Worktrees sit under their main checkout, with branch and ahead/behind.
+- Each worktree is a card holding its agents, with its Linear issue's state color down the left. Below, buttons show its issue in the Linear panel and its PR (with checks) in the GitHub panel; PRs are looked up per repo, not per worktree, every 3 minutes.
 - Sorted by activity by default: spaces with an agent working or waiting on you first, then by when anything last happened (an agent's turn, or you leaving the space), in bands of the last hour, today, this week and older. Spaces keep their order within a band, so the list doesn't reshuffle on every agent turn, and stale ones sink. The Recent / Manual switch in the header goes back to your own dragged order.
 - Spaces whose Linear issues share a top issue group under a header naming it. The header is colored, can be folded, and sums up its agents (working, waiting on you). Spaces nest by issue level on a rail in the family's color.
 - A space is matched to its issue by folder, name or git branch.

@@ -8,6 +8,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, machines, panes, agents, readTextFile, appHome, run, openOverlay, exec, hc, theme, shared, setShared, setAgentOrder, watchFolder, window, layout } from "herdr";
+import { slugOf, listPrs, prFor, checkState, prState, COLOR } from "./prs.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -17,6 +18,22 @@ function find(node, id) {
   }
   return null;
 }
+
+// Shows a layout block (a panel's detail view): its stack's tab picked, it and
+// every hidden block above it shown. False when the layout has no such block.
+function reveal(id) {
+  const path = [];
+  const walk = (n) => { path.push(n); if (n?.id === id) return true; for (const c of n?.children ?? []) if (walk(c)) return true; path.pop(); return false; };
+  if (!walk(layout())) return false;
+  path.forEach((n, i) => {
+    if (n.type === "stack" && path[i + 1]) run("layout.select", { stack: n.id, child: path[i + 1].id });
+    if (n.hidden) run("layout.show", { id: n.id });
+  });
+  return true;
+}
+
+// Each repo's PRs are asked for again this often while the window is in front.
+const PR_POLL = 3 * 60 * 1000;
 
 // The sidebar's rail goes by its width, not a flag: dragging its edge narrows it too.
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
@@ -300,6 +317,8 @@ export default class Spaces extends View {
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+    this.slugs = {}; // a repo (git's this.git[].repo) -> its GitHub owner/repo, or null
+    this.prs = {}; // owner/repo -> { at, list } (list null: gh couldn't say)
     this.asked = {}; // issue id -> when it was last looked up in Linear
     this.lookupIssues(cx);
     cx.timer.every(5000, (cx) => this.lookupIssues(cx));
@@ -336,7 +355,37 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
+    this.refreshPrs(now, cx);
     if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
+  }
+
+  // The PRs of every repo with a worktree in the list: once, then every
+  // PR_POLL while the window is in front.
+  refreshPrs(now, cx) {
+    for (const [key, g] of Object.entries(this.git)) {
+      if (!g?.linked) continue;
+      if (!(g.repo in this.slugs)) {
+        this.slugs[g.repo] = undefined; // being looked up
+        const [on, cwd] = JSON.parse(key);
+        cx.spawn(async (cx) => { this.slugs[g.repo] = await slugOf(cwd, on); cx.notify(); });
+        continue;
+      }
+      const slug = this.slugs[g.repo];
+      const had = slug && this.prs[slug];
+      if (!slug || had?.busy || (had && !(window().active && now - had.at > PR_POLL))) continue;
+      this.prs[slug] = { ...had, at: now, busy: true };
+      cx.spawn(async (cx) => {
+        const list = await listPrs(slug, (all) => { this.prs[slug] = { ...this.prs[slug], list: all }; cx.notify(); });
+        this.prs[slug] = { at: now, list: list ?? had?.list ?? null };
+        cx.notify();
+      });
+    }
+  }
+
+  // A worktree's PR, by its branch, once its repo's PRs are in.
+  prOf(g) {
+    const list = this.prs[this.slugs[g?.repo]]?.list;
+    return list && g.branch ? prFor(list, g.branch) : null;
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -544,14 +593,14 @@ export default class Spaces extends View {
   }
 
   // One agent under its space, indented to the space's name.
-  agentRow({ a, name }, tree, t, now, fam = null) {
+  agentRow({ a, name }, tree, t, now, fam = null, inCard = false) {
     const pic = programIcon(a.program, 14, t.foreground);
     const idle = a.status === "idle" && !a.focused;
     const when = this.changed[a.address]?.at;
     const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
-    return h_flex().id(`ag-${a.address}`).h(26).flex_none().pl((tree ? 52 : 35) + famIndent(fam)).pr(8).gap(8).items_center().rounded(7)
+    return h_flex().id(`ag-${a.address}`).h(26).flex_none().pl(inCard ? 30 : (tree ? 52 : 35) + famIndent(fam)).pr(8).gap(8).items_center().rounded(7)
       .text_size(12.5).cursor_pointer()
-      .when(Boolean(fam), (el) => el.relative().child(this.rail(`rail-ag-${a.address}`, fam, tree)))
+      .when(Boolean(fam) && !inCard, (el) => el.relative().child(this.rail(`rail-ag-${a.address}`, fam, tree)))
       .when(a.focused, (el) => el.bg(t.selected))
       .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
       .on_click(() => run("pane.focus", { pane: a.pane }))
@@ -717,6 +766,7 @@ export default class Spaces extends View {
       if (r.fam && this.famFolded.has(r.fam.key)) return [];
       const mine = by.get(r.w.id) ?? [];
       for (const x of mine) order.push(x.a.address);
+      if (r.g?.linked) return [this.card(r, mine, t, now)];
       return [this.row(r, t), ...mine.map((x) => this.agentRow(x, r.tree, t, now, r.fam))];
     };
     this.agentOrder = order;
@@ -788,7 +838,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree, fam, closed }, t) {
+  row({ w, i, g, tree, fam, closed }, t, inCard = false) {
     // One highlight at a time: the focused agent's row takes it from its space.
     const on = w.active && !agents().some((a) => a.space === w.id && a.focused);
     const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
@@ -802,7 +852,8 @@ export default class Spaces extends View {
       .h(rowHeight({ tree }))
       .flex_none()
       .justify_center()
-      .rounded(8)
+      .when(!inCard, (el) => el.rounded(8))
+      .when(inCard, (el) => el.rounded_tr(8)) // its highlight inside the card's top right corner
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
       .when(this.pressed === w.id && this.over !== w.id, (el) => el.opacity(0.5))
@@ -835,18 +886,71 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      .when(Boolean(fam), (el) => el.child(this.rail(`rail-${w.id}`, fam, tree)))
+      .when(Boolean(fam) && !inCard, (el) => el.child(this.rail(`rail-${w.id}`, fam, tree)))
       .child(
         h_flex()
           .gap(9)
           .items_center()
-          .when(Boolean(tree) || Boolean(fam), el => el.pl((tree ? 22 : 0) + famIndent(fam)))
-          .when(Boolean(tree), el => el.child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
+          .when(!inCard && (Boolean(tree) || Boolean(fam)), el => el.pl((tree ? 22 : 0) + famIndent(fam)))
+          .when(Boolean(tree) || inCard, el => el.child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(closed ? t.muted : t.foreground).child(w.name))
           .when(Boolean(closed), (el) => el.child(this.closedTag(w, closed, t)))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
+  }
+
+  // A worktree as a card: its row and agents, the issue's state color down the
+  // left, and below them buttons for its Linear issue and its PR.
+  card(r, mine, t, now) {
+    const { w, tree, fam } = r;
+    const issue = r.issue;
+    const pr = this.prOf(r.g);
+    return div().id(`wrap-${w.id}`).relative().flex_none().py(2).pl((tree ? 22 : 0) + famIndent(fam) + (fam ? 4 : 0))
+      .when(Boolean(fam), (el) => el.child(this.rail(`rail-${w.id}`, fam, tree)))
+      // The card is painted in the issue's color and its body inset 3px on the
+      // left, so the color runs down the left and curves with the card's corners
+      // (children are clipped to a rectangle, not to rounded corners). The body
+      // has the border: the theme's border is see-through, so on the card it
+      // would take the color all round.
+      .child(div().id(`card-${w.id}`).rounded(8).bg(issue?.state?.color ?? t.border).pl(3)
+       .child(v_flex().id(`card-body-${w.id}`).rounded_r(8).border(1).border_l(0).border_color(t.border).bg(t.surface)
+        .child(this.row(r, t, true))
+        .children(mine.map((x) => this.agentRow(x, tree, t, now, fam, true)))
+        .child(h_flex().h(28).flex_none().pl(10).pr(6).gap(6).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
+          .child(issue ? this.issueButton(w, issue, t) : div().px(4).child("No issue"))
+          .child(pr ? this.prButton(w, r.g, pr, t) : div().px(4).child("No PR")))))
+  }
+
+  issueButton(w, issue, t) {
+    const s = issue.state ?? {};
+    return h_flex().id(`issue-${w.id}`).flex_none().h(20).px(6).gap(5).items_center().rounded(5).cursor_pointer()
+      .text_color(t.muted).hover((st) => st.bg(t.hover).text_color(t.foreground))
+      .tooltip(`${issue.identifier} · ${s.name ?? ""}: ${issue.title ?? ""}\nShow it in the Linear panel`)
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        setShared("linear.detail", issue.identifier);
+        if (!reveal("linear-detail")) openOverlay({ mod: "linear-issues", kind: "window", key: "linear-issues", keep: true, width: 480, height: 0.8 });
+      })
+      // In progress has three steps of icon; without the team's states, the middle one (as the Linear panel).
+      .when(Boolean(s.type), (el) => el.child(svg(`mods/linear-issues/state-${s.type === "started" ? "started-2" : s.type}.svg`).size(11).flex_none().text_color(s.color ?? t.dim)))
+      .child(issue.identifier);
+  }
+
+  prButton(w, g, pr, t) {
+    const state = prState(pr), checks = state === "open" || state === "draft" ? checkState(pr.statusCheckRollup) : null;
+    const slug = this.slugs[g.repo];
+    return h_flex().id(`pr-${w.id}`).flex_none().h(20).px(6).gap(5).items_center().rounded(5).cursor_pointer()
+      .text_color(t.muted).hover((st) => st.bg(t.hover).text_color(t.foreground))
+      .tooltip(`#${pr.number} · ${state}${checks ? `, checks ${checks}` : ""}: ${pr.title ?? ""}\nShow it in the GitHub panel`)
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        setShared("github.detail", { repo: slug, kind: "pr", id: pr.number });
+        if (!reveal("github-detail") && pr.url) exec("open", [pr.url]).catch(() => {});
+      })
+      .child(svg(`mods/github/pr-${state}.svg`).size(12).flex_none().text_color(COLOR[state]))
+      .child(`#${pr.number}`)
+      .when(Boolean(checks), (el) => el.child(svg(`mods/github/check-${checks}.svg`).size(11).flex_none().text_color(COLOR[checks])));
   }
 
   // The issue is closed in Linear: the state as Linear draws it, so the worktree stands out for cleanup.

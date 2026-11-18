@@ -68,7 +68,7 @@ test("times carry over from the old agents list", async () => {
   assert.match(text(byId(v.render(), "ag-a1")), /2h/);
 });
 
-test("a worktree space sits under its checkout, with its agents indented further", async () => {
+test("a worktree space sits under its checkout as a card, its agents inside it", async () => {
   host.spaces.splice(1, 0, { id: "s3", name: "feature-x", folder: "/r/wt", tabs: [{ id: "t3", name: "1", named: false }] });
   host.panes.push({ pane: "p3", tab: "t3", terminal: "a3", cwd: "/r/wt", program: claude, title: "" });
   host.agents.splice(1, 0, { address: "a3", pane: "p3", space: "s3", space_name: "feature-x", tab: "t3", status: "idle", program: claude });
@@ -84,7 +84,8 @@ test("a worktree space sits under its checkout, with its agents indented further
   const root = v.render();
   assert.deepEqual(ids(root), ["space-s1", "ag-a1", "space-s3", "ag-a3", "space-s2", "ag-a2"]);
   assert.ok([...walk(byId(root, "space-s3"))].some((e) => e.kind === "svg" && /branch\.svg/.test(e.arg)));
-  assert.equal(byId(root, "ag-a3").props.pl, 52);
+  assert.ok(byId(byId(root, "card-s3"), "ag-a3"), "in the card");
+  assert.equal(byId(root, "ag-a3").props.pl, 30, "under the name, past the branch icon");
   assert.equal(byId(root, "ag-a1").props.pl, 35);
 });
 
@@ -506,4 +507,117 @@ test("with nothing finished there's no cleanup button; it works in manual order 
   assert.ok(byId(v.render(), "cleanup"), "manual order still offers it");
   host.spaces = host.spaces.filter((w) => !["done", "quiet", "notice"].includes(w.id));
   assert.equal(byId(v.render(), "cleanup"), null);
+});
+
+// ---- worktree cards: the issue's state down the left, its Linear issue and PR below
+
+const ISSUE = { identifier: "PRD-10741", title: "SW RT", state: { type: "started", name: "In Progress", color: "#f2c94c" } };
+const PR = (number, branch, state = "OPEN", extra = {}) => ({ number, headRefName: branch, state, isDraft: false, url: `https://github.com/sherpas/basecamp/pull/${number}`,
+  statusCheckRollup: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }], ...extra });
+const PANEL = { id: "panel", hidden: true, children: [{ id: "panel-body", type: "stack", active: "files", children: [
+  { id: "files" }, { id: "github", children: [{ id: "github-list" }, { id: "github-detail", hidden: true }] },
+  { id: "linear", children: [{ id: "linear-list" }, { id: "linear-detail", hidden: true }] }] }] };
+
+async function cards(prs = [PR(400, "feature/prd-10741", "CLOSED"), PR(512, "feature/prd-10741")], wait = async () => {}) {
+  host.spaces.splice(1, 0,
+    { id: "s3", name: "SW RT", folder: "/r/wt", tabs: [{ id: "t3", name: "1", named: false }] },
+    { id: "s4", name: "spike", folder: "/r/wt2", tabs: [{ id: "t4", name: "1", named: false }] });
+  host.panes.push({ pane: "p3", tab: "t3", terminal: "a3", cwd: "/r/wt", program: claude, title: "" });
+  host.agents.splice(1, 0, { address: "a3", pane: "p3", space: "s3", space_name: "SW RT", tab: "t3", status: "idle", program: claude });
+  host.shared["linear.mine"] = { issues: [ISSUE] };
+  const branch = { "/r/main": "main", "/r/wt": "feature/prd-10741", "/r/wt2": "spike" };
+  host.exec = async (cmd, args, { cwd } = {}) => {
+    if (cmd === "gh" && args[0] === "--version") return { code: 0, stdout: "gh 2\n", stderr: "" };
+    if (cmd === "gh" && args[0] === "pr") await wait(args);
+    if (cmd === "gh" && args[0] === "pr") return prs ? { code: 0, stdout: JSON.stringify(prs), stderr: "" } : { code: 1, stdout: "", stderr: "error connecting to api.github.com" };
+    if (!branch[cwd]) return { code: 128, stdout: "", stderr: "fatal: not a git repository" };
+    if (args.includes("status")) return { code: 0, stdout: `# branch.head ${branch[cwd]}\n`, stderr: "" };
+    if (args.includes("--show-toplevel")) return { code: 0, stdout: `${cwd}\n`, stderr: "" };
+    if (args.includes("--git-common-dir")) return { code: 0, stdout: "/r/main/.git\n", stderr: "" };
+    if (args.join(" ") === "remote get-url origin") return { code: 0, stdout: "git@github.com:sherpas/basecamp.git\n", stderr: "" };
+    return { code: 1, stdout: "", stderr: "" };
+  };
+  const { v, cx } = await mount();
+  for (let i = 0; i < 3; i++) { await cx.tick(); await cx.settle(); }
+  return { v, cx };
+}
+
+test("a worktree is a card: its row and agents, the issue's state color down the left, its issue and PR below", async () => {
+  const { v } = await cards();
+  const root = v.render();
+  assert.equal(byId(root, "card-s1"), null, "the checkout stays a plain row");
+  const card = byId(root, "card-s3");
+  assert.ok(byId(card, "space-s3") && byId(card, "ag-a3"), "the row and its agents are in the card");
+  assert.equal(card.props.bg, "#f2c94c", "the card in the issue's color…");
+  assert.equal(card.props.pl, 3, "…showing 3px of it down the left, under the card's own rounded corners");
+  const body = byId(card, "card-body-s3");
+  assert.equal(body.props.bg, host.theme.surface);
+  assert.equal(card.props.border, undefined, "no border on the colored card: a see-through one would take the color");
+  assert.equal(body.props.border_l, 0, "the body's border leaves the left to the color");
+  assert.match(text(byId(card, "issue-s3")), /PRD-10741/);
+  assert.ok([...walk(byId(card, "issue-s3"))].some((e) => e.kind === "svg" && /state-started-2\.svg/.test(e.arg)));
+  assert.match(text(byId(card, "pr-s3")), /#512/, "the open PR, not the older closed one");
+  assert.ok([...walk(byId(card, "pr-s3"))].some((e) => e.kind === "svg" && /check-success\.svg/.test(e.arg)), "its checks");
+  assert.deepEqual(ids(root), ["space-s1", "ag-a1", "space-s3", "ag-a3", "space-s4", "space-s2", "ag-a2"], "same order as before");
+});
+
+test("a card without an issue or PR says so, and isn't clickable there", async () => {
+  const { v } = await cards();
+  const card = byId(v.render(), "card-s4");
+  assert.equal(byId(card, "issue-s4"), null);
+  assert.equal(byId(card, "pr-s4"), null);
+  assert.match(text(card), /No issue.*No PR/s);
+});
+
+test("the issue button shows it in the Linear panel; the PR button in the GitHub panel", async () => {
+  host.layout.children.push(PANEL);
+  const { v, cx } = await cards();
+  byId(v.render(), "issue-s3").handlers.on_click({}, cx);
+  assert.equal(host.shared["linear.detail"], "PRD-10741");
+  assert.deepEqual(host.ran("layout.select"), [{ stack: "panel-body", child: "linear" }]);
+  assert.deepEqual(host.ran("layout.show").map((a) => a.id), ["panel", "linear-detail"]);
+  byId(v.render(), "pr-s3").handlers.on_click({}, cx);
+  assert.deepEqual(host.shared["github.detail"], { repo: "sherpas/basecamp", kind: "pr", id: 512 });
+  assert.deepEqual(host.ran("layout.select").at(-1), { stack: "panel-body", child: "github" });
+  assert.deepEqual(host.ran("space.select"), [], "the active space stays");
+});
+
+test("without the panels in the layout, the issue opens the Linear window and the PR its page", async () => {
+  const { v, cx } = await cards();
+  byId(v.render(), "issue-s3").handlers.on_click({}, cx);
+  assert.equal(host.overlays.at(-1).mod, "linear-issues");
+  byId(v.render(), "pr-s3").handlers.on_click({}, cx);
+  await cx.settle();
+  assert.ok(host.execs.some(([cmd, args]) => cmd === "open" && args[0] === "https://github.com/sherpas/basecamp/pull/512"));
+});
+
+test("PRs are asked for per repo, not per worktree: open ones with their checks, then every state without", async () => {
+  await cards();
+  const calls = host.execs.filter(([cmd, args]) => cmd === "gh" && args[0] === "pr").map(([, a]) => a);
+  assert.deepEqual(calls.map((a) => a.slice(0, 6)), [
+    ["pr", "list", "-R", "sherpas/basecamp", "--state", "open"],
+    ["pr", "list", "-R", "sherpas/basecamp", "--state", "all"]]);
+  assert.ok(calls[0].at(-1).includes("statusCheckRollup") && !calls[1].at(-1).includes("statusCheckRollup"),
+    "checks for 100 PRs of every state is more than GitHub answers in time");
+});
+
+test("a worktree's PR shows as soon as the quick ask answers, before the open PRs' checks are in", async () => {
+  let release;
+  const slow = new Promise((r) => { release = r; });
+  const { v, cx } = await cards([PR(512, "feature/prd-10741")], async (args) => { if (args.includes("open")) await slow; });
+  assert.match(text(byId(v.render(), "pr-s3")), /#512/, "from the every-state list");
+  release(); await cx.settle();
+  assert.ok([...walk(byId(v.render(), "pr-s3"))].some((e) => e.kind === "svg" && /check-success\.svg/.test(e.arg)), "then its checks");
+});
+
+test("a merged PR shows as merged", async () => {
+  const { v } = await cards([PR(498, "feature/prd-10741", "MERGED")]);
+  assert.ok([...walk(byId(v.render(), "pr-s3"))].some((e) => e.kind === "svg" && /pr-merged\.svg/.test(e.arg)));
+});
+
+test("without gh (or offline) the cards still show their issue, and no PR", async () => {
+  const { v } = await cards(null);
+  const root = v.render();
+  assert.match(text(byId(root, "issue-s3")), /PRD-10741/);
+  assert.equal(byId(root, "pr-s3"), null);
 });
