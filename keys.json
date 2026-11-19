@@ -81,7 +81,10 @@
   "layout:main-linear": {
     "cmd-shift-i": "tabs-linear.linear",
     "cmd-shift-g": "tabs-linear.github",
-    "cmd-shift-e": "tabs-linear.sketch"
+    "cmd-shift-e": "tabs-linear.sketch",
+    "cmd-alt-s": "layout.toggle:sidebar",
+    "cmd-alt-p": "layout.toggle:panel",
+    "cmd-alt-e": "tabs-linear.sketch"
   },
   "mod:Sketch": {
     "cmd-d": "Sketch.duplicate",

@@ -73,6 +73,9 @@ state (the Sketch boards in `data/`, `shared.json`), so `.gitignore` leaves it o
 | ⌘⇧I | Open or close the Linear panel (a floating window outside `main-linear`) |
 | ⌘⇧G | Open or close the GitHub panel (`main-linear`) |
 | ⌘⇧E | Open Sketch (a pane to the right; the panel's Sketch button in `main-linear`) |
+| ⌥⌘S | Open or close the Spaces sidebar (`main-linear`; same as ⌘B) |
+| ⌥⌘P | Open or close the right panel, showing whichever of Files, Changes, GitHub or Linear it last showed (`main-linear`) |
+| ⌥⌘E | Open or close this tab's Sketch (`main-linear`; same as ⌘⇧E) |
 | ⌘⇧L | Switch layout (pick `main-linear`) |
 | ⌘D (in a Sketch board) | Duplicate the selection, instead of splitting the pane |
 | ⌘⇧G (in a Sketch board) | Ungroup, instead of toggling the GitHub panel |

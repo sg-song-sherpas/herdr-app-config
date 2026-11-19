@@ -93,3 +93,13 @@ test("the Sketch agent skill names itself, and every path it tells an agent to u
   for (const p of paths) assert.ok(existsSync(home + p), p);
   assert.match(read("mods/Sketch/FORMAT.md"), /skills\/herdr-sketch\/scripts\/sketch-board\.mjs/);
 });
+
+test("in main-linear, ⌥⌘S, ⌥⌘P and ⌥⌘E open or close the Spaces sidebar, the right panel and Sketch", () => {
+  const k = JSON.parse(read("keys.json"))["layout:main-linear"];
+  assert.equal(k["cmd-alt-s"], "layout.toggle:sidebar");
+  assert.equal(k["cmd-alt-p"], "layout.toggle:panel");
+  assert.equal(k["cmd-alt-e"], "tabs-linear.sketch");
+  const layout = JSON.parse(read("layouts/main-linear.json"));
+  const ids = new Set(); (function walk(n) { ids.add(n.id); (n.children ?? []).forEach(walk); })(layout);
+  for (const id of ["sidebar", "panel"]) assert.ok(ids.has(id), `main-linear has a "${id}" block`);
+});
