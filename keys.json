@@ -3,10 +3,20 @@
     "cmd-q": "app.quit",
     "cmd-h": "app.hide",
     "cmd-alt-h": "app.hide_others",
-    "cmd-t": "tab.new",
+    "cmd-t": {
+      "command": "tab.new",
+      "args": {
+        "argv": [
+          "codex",
+          "--no-daemon"
+        ]
+      }
+    },
     "cmd-w": "tab.close",
     "ctrl-tab": "tab.next",
     "ctrl-shift-tab": "tab.prev",
+    "ctrl-swipeleft": "tab.prev",
+    "ctrl-swiperight": "tab.next",
     "cmd-shift-]": "tab.next",
     "cmd-shift-[": "tab.prev",
     "cmd-alt-]": "space.next",
@@ -17,7 +27,7 @@
     "cmd-n": "space.new",
     "cmd-p": "mod.open:picker",
     "cmd-shift-p": "app.palette",
-    "cmd-,": "app.settings",
+    "cmd-,": "mod.open:agent-control-settings",
     "cmd-d": "pane.split:right",
     "cmd-shift-d": "pane.split:down",
     "cmd-shift-w": "pane.close",
@@ -31,7 +41,7 @@
     "cmd-alt-shift-up": "pane.swap:up",
     "cmd-alt-shift-down": "pane.swap:down",
     "f2": "tab.rename",
-    "shift-f2": "space.rename",
+    "shift-f2": "spaces-agents.rename",
     "cmd-/": "app.help",
     "cmd-shift-/": "app.help",
     "cmd-b": "layout.toggle:sidebar",
@@ -65,7 +75,10 @@
         "direction": "right",
         "mod": "Sketch"
       }
-    }
+    },
+    "cmd-k": "mod.open:switcher",
+    "cmd-shift-t": "tab.reopen",
+    "cmd-shift-n": "mod.open:worktree-codex"
   },
   "terminal": {
     "cmd-c": "terminal.copy",
@@ -79,15 +92,33 @@
     "cmd-backspace": "send:\u0015"
   },
   "layout:main-linear": {
+    "ctrl-tab": "tabs-linear.previous",
+    "ctrl-shift-tab": "tabs-linear.previous-reverse",
+    "ctrl-swipeleft": "tabs-linear.history-back",
+    "ctrl-swiperight": "tabs-linear.history-forward",
     "cmd-shift-i": "tabs-linear.linear",
-    "cmd-shift-g": "tabs-linear.github",
     "cmd-shift-e": "tabs-linear.sketch",
-    "cmd-alt-s": "layout.toggle:sidebar",
-    "cmd-alt-p": "layout.toggle:panel",
-    "cmd-alt-e": "tabs-linear.sketch"
+    "cmd-shift-s": "tabs-linear.star",
+    "cmd-alt-s": "spaces-agents.favorites-only"
   },
   "mod:Sketch": {
     "cmd-d": "Sketch.duplicate",
     "cmd-shift-g": "Sketch.ungroup"
+  },
+  "layout:agent-control-center": {
+    "ctrl-tab": "tabs-linear.previous",
+    "ctrl-shift-tab": "tabs-linear.previous-reverse",
+    "ctrl-swipeleft": "tabs-linear.history-back",
+    "ctrl-swiperight": "tabs-linear.history-forward",
+    "cmd-shift-i": "tabs-linear.linear",
+    "cmd-shift-e": "tabs-linear.sketch",
+    "cmd-shift-s": "tabs-linear.star",
+    "cmd-alt-s": "spaces-agents.favorites-only",
+    "cmd-alt-shift-a": "agent-control-center.next-attention",
+    "cmd-alt-shift-r": "agent-control-center.resume",
+    "cmd-alt-shift-d": "agent-control-center.delta",
+    "cmd-alt-shift-f": "agent-control-center.conflicts",
+    "cmd-alt-shift-b": "agent-control-center.previous",
+    "cmd-shift-u": "agent-control-center.next-attention"
   }
 }

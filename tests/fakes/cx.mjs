@@ -6,6 +6,19 @@ export function makeCx() {
     notified: 0,
     stopped: 0,
     timers: [],
+    bindings: [],
+    bind_keys(bindings) { cx.bindings.push(...bindings); },
+    new(Class, props) {
+      const childCx = makeCx(), view = new Class();
+      view.init?.(props, childCx);
+      const entity = {
+        kind: "entity", props: {}, calls: [], handlers: {}, view, cx: childCx, released: false,
+        get kids() { return entity.released ? [] : [view.render(childCx)]; },
+        set_props(p) { view.update?.(p); childCx.notify(); },
+        release() { entity.released = true; for (const timer of childCx.timers) timer.cancel(); return true; },
+      };
+      return entity;
+    },
     notify() { cx.notified++; },
     stop_propagation() { cx.stopped++; },
     // The system clipboard's text (undefined: it holds none, or only a picture).

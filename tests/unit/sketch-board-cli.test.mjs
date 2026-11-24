@@ -23,6 +23,22 @@ const run = (s, args, cwd) => spawnSync(process.execPath, [cli, ...args], {
 });
 const where = (s, cwd) => { const r = run(s, [], cwd); assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout); };
 
+test("popup sketches and diff range comments are validated recursively in the same board folder", () => {
+  const s = scratch(), w = where(s, s.repo);
+  const popup = { width: 520, height: 380, shapes: [{ id: "text", type: "text", x: 0, y: 0, text: "댓글" }] };
+  const shapes = [
+    { id: "pin", type: "popup", x: 0, y: 0, w: 44, h: 44, popup },
+    { id: "diff", type: "diff", x: 0, y: 80, w: 520, h: 280, comments: [{ id: "comment", startRow: 0, endRow: 1, quote: ["-old", "+new"], popup }] },
+  ];
+  writeFileSync(w.board, JSON.stringify({ shapes }));
+  assert.equal(run(s, ["check"], s.repo).status, 0);
+  shapes[0].popup.shapes.push({ id: "arrow", type: "arrow", from: "missing", to: "text" });
+  writeFileSync(w.board, JSON.stringify({ shapes }));
+  const bad = run(s, ["check"], s.repo);
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, /popup.*missing/);
+});
+
 test("from anywhere in a worktree it names that worktree's board, the one the pane opens", () => {
   const s = scratch();
   const w = where(s, join(s.repo, "src"));

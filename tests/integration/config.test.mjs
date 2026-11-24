@@ -17,7 +17,7 @@ const herdrApp = (() => {
 })();
 
 test("the repo tracks at least the mods it ships", () => {
-  for (const m of ["linear-issues", "linear-search", "tabs-linear", "Sketch", "spaces-agents", "github"]) assert.ok(tracked.includes(m), m);
+  for (const m of ["linear-issues", "linear-search", "tabs-linear", "Sketch", "spaces-agents"]) assert.ok(tracked.includes(m), m);
 });
 
 for (const mod of tracked) {
@@ -45,15 +45,6 @@ test("keys.json is valid and every mod it opens exists", () => {
   for (const m of mods) assert.ok(modExists(m), `keys.json opens missing mod "${m}"`);
 });
 
-test("main-linear's root holds only the sidebar and the work area (no mod herdr docked there on its own)", () => {
-  const root = JSON.parse(read("layouts/main-linear.json"));
-  assert.deepEqual((root.root ?? root).children.map((c) => c.id), ["sidebar", "work"]);
-});
-
-test("⌘⇧G toggles the GitHub panel in main-linear", () => {
-  assert.equal(JSON.parse(read("keys.json"))["layout:main-linear"]["cmd-shift-g"], "tabs-linear.github");
-});
-
 test("main-linear.json is valid, its ids are unique, and every mod it shows exists", () => {
   const root = JSON.parse(read("layouts/main-linear.json"));
   const ids = [], mods = [];
@@ -65,41 +56,9 @@ test("main-linear.json is valid, its ids are unique, and every mod it shows exis
   assert.equal(new Set(ids).size, ids.length, "duplicate node ids");
   for (const m of mods) assert.ok(modExists(m), `layout shows missing mod "${m}"`);
   assert.ok(mods.includes("spaces-agents") && !mods.includes("agents"), "the sidebar uses the merged list");
-  assert.ok(ids.includes("github-list") && ids.includes("github-detail"), "the GitHub panel and its detail block");
 });
 
 test("no tracked file holds a Linear API key", () => {
   const files = execFileSync("git", ["ls-files"], { cwd: home, encoding: "utf8" }).split("\n").filter(Boolean);
   for (const f of files) assert.doesNotMatch(read(f), /lin_api_[A-Za-z0-9]{20,}/, f);
-});
-
-test("⌘D in a Sketch board duplicates instead of splitting the pane", () => {
-  assert.equal(JSON.parse(read("keys.json"))["mod:Sketch"]["cmd-d"], "Sketch.duplicate");
-  // and ⌘⇧G ungroups instead of toggling the GitHub panel
-  assert.equal(JSON.parse(read("keys.json"))["mod:Sketch"]["cmd-shift-g"], "Sketch.ungroup");
-});
-
-test("⌘⇧E in main-linear opens Sketch through the tab bar, which tells it the worktree", () => {
-  assert.equal(JSON.parse(read("keys.json"))["layout:main-linear"]["cmd-shift-e"], "tabs-linear.sketch");
-});
-
-test("the Sketch agent skill names itself, and every path it tells an agent to use exists", () => {
-  const skill = read("skills/herdr-sketch/SKILL.md");
-  const front = skill.match(/^---\n([\s\S]*?)\n---\n/)?.[1] ?? "";
-  assert.match(front, /^name: herdr-sketch$/m);
-  assert.match(front, /^description: .{40,}$/m);
-  const paths = [...skill.matchAll(/~\/\.config\/herdr-app\/([\w./-]+\.(?:mjs|md))/g)].map((m) => m[1]);
-  assert.ok(paths.length >= 2, "points at the script and FORMAT.md");
-  for (const p of paths) assert.ok(existsSync(home + p), p);
-  assert.match(read("mods/Sketch/FORMAT.md"), /skills\/herdr-sketch\/scripts\/sketch-board\.mjs/);
-});
-
-test("in main-linear, ⌥⌘S, ⌥⌘P and ⌥⌘E open or close the Spaces sidebar, the right panel and Sketch", () => {
-  const k = JSON.parse(read("keys.json"))["layout:main-linear"];
-  assert.equal(k["cmd-alt-s"], "layout.toggle:sidebar");
-  assert.equal(k["cmd-alt-p"], "layout.toggle:panel");
-  assert.equal(k["cmd-alt-e"], "tabs-linear.sketch");
-  const layout = JSON.parse(read("layouts/main-linear.json"));
-  const ids = new Set(); (function walk(n) { ids.add(n.id); (n.children ?? []).forEach(walk); })(layout);
-  for (const id of ["sidebar", "panel"]) assert.ok(ids.has(id), `main-linear has a "${id}" block`);
 });

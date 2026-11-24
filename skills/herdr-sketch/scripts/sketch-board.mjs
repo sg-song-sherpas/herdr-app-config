@@ -57,12 +57,22 @@ function where(folder) {
 const num = (v) => typeof v === "number" && Number.isFinite(v);
 const pt = (p) => Array.isArray(p) && p.length === 2 && p.every(num);
 
-function problems(text, dir) {
+function problems(text, dir, depth = 0) {
+  if (depth > 64) return [["popup nesting exceeds 64 boards"], 0];
   let d;
   try { d = JSON.parse(text); } catch (e) { return [[`not JSON: ${e.message}`], 0]; }
   const list = Array.isArray(d) ? d : d?.shapes;
   if (!Array.isArray(list)) return [['no "shapes" list'], 0];
   const out = [], seen = new Set(), byId = new Map();
+  const popupProblems = (popup, name) => {
+    if (!popup || typeof popup !== "object" || !Array.isArray(popup.shapes)) {
+      out.push(`${name}: popup needs a "shapes" list`);
+      return;
+    }
+    for (const key of ["width", "height"]) if (popup[key] != null && (!num(popup[key]) || popup[key] <= 0)) out.push(`${name}: popup ${key} must be a positive number`);
+    const [bad] = problems(JSON.stringify({ shapes: popup.shapes }), dir, depth + 1);
+    out.push(...bad.map((error) => `${name} popup: ${error}`));
+  };
   for (const s of list) if (s && typeof s.id === "string") byId.set(s.id, s);
   list.forEach((s, i) => {
     const name = s?.id != null ? `"${s.id}"` : `#${i}`;
@@ -73,6 +83,26 @@ function problems(text, dir) {
     const missing = need.filter((k) => !num(s[k]));
     if (missing.length) out.push(`${name}: needs numbers ${missing.join(", ")}`);
     if (s.type === "text" && typeof s.text !== "string") out.push(`${name}: needs "text"`);
+    if (s.popup != null) popupProblems(s.popup, name);
+    if (s.comments != null) {
+      if (s.type !== "diff" || !Array.isArray(s.comments)) out.push(`${name}: "comments" must be a list on a diff`);
+      else {
+        const ids = new Set();
+        for (const comment of s.comments) {
+          const label = `${name} comment "${comment?.id}"`;
+          if (!comment || typeof comment.id !== "string" || ids.has(comment.id)) {
+            out.push(`${label}: needs a unique string id`);
+            continue;
+          }
+          ids.add(comment.id);
+          if (!Number.isInteger(comment.startRow) || comment.startRow < 0 || !Number.isInteger(comment.endRow) || comment.endRow < comment.startRow
+            || !Array.isArray(comment.quote) || comment.quote.length !== comment.endRow - comment.startRow + 1 || !comment.quote.every((line) => typeof line === "string")) {
+            out.push(`${label}: needs startRow/endRow and matching quote lines`);
+          }
+          popupProblems(comment.popup, label);
+        }
+      }
+    }
     if (s.type === "image") {
       if (typeof s.src !== "string") out.push(`${name}: needs "src"`);
       else if (!existsSync(join(dir, s.src))) out.push(`${name}: picture ${s.src} isn't in ${dir}`);

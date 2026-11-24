@@ -4,8 +4,8 @@ import { ICONS, ICON_TYPES, partPoints, arc } from "../../mods/Sketch/icons.js";
 import { rng, roughCurve, strokePoints } from "../../mods/Sketch/rough.js";
 import { hits, edge } from "../../mods/Sketch/main.js";
 
-const SYSTEM = ["person", "database", "server", "cloud", "browser", "phone", "document", "queue", "frame"];
-const NOTES = ["note", "bubble", "bulb", "question", "alert", "gear", "clock", "lock", "envelope", "folder"];
+const SYSTEM = ["diff", "person", "database", "db-table", "server", "cloud", "browser", "phone", "document", "queue", "frame"];
+const NOTES = ["popup", "note", "bubble", "bulb", "question", "alert", "gear", "clock", "lock", "envelope", "folder"];
 
 test("the picture shapes are the ones the toolbar offers: system parts, then notes and markers", () => {
   assert.deepEqual(ICON_TYPES, [...SYSTEM, ...NOTES]);
@@ -33,7 +33,7 @@ test("a cloud fills its box from edge to edge", () => {
 
 test("small pictures are labeled under them, a frame at its top left, containers inside", () => {
   const where = Object.fromEntries(ICON_TYPES.map((t) => [t, ICONS[t].draw(0, 0, 200, 120).label]));
-  for (const t of ["person", "server", "phone", "bulb", "question", "alert", "gear", "clock", "lock", "envelope"]) assert.equal(where[t], "below", t);
+  for (const t of ["popup", "person", "server", "phone", "bulb", "question", "alert", "gear", "clock", "lock", "envelope"]) assert.equal(where[t], "below", t);
   assert.equal(where.frame, "title");
   for (const t of ["database", "cloud", "browser", "document", "queue", "note", "bubble", "folder"]) {
     const l = where[t];
@@ -108,4 +108,21 @@ test("an arrow meets a cloud on its rounded outline, a database on its box", () 
   const c = edge(cloud, corner), d = edge(db, corner);
   assert.ok(Math.hypot(c[0] - 100, c[1] - 50) < Math.hypot(d[0] - 100, d[1] - 50), "the cloud's point is nearer its middle");
   assert.ok(Math.abs(d[1] - 106) < 1e-9, "the database's on its box's bottom, 6px out");
+});
+
+
+test("DB Table has a title strip above three rows and a key column", () => {
+  const icon = ICONS["db-table"];
+  assert.equal(icon.label, "DB Table");
+  const d = icon.draw(10, 20, 220, 160);
+  assert.equal(d.fill.length, 1);
+  assert.ok(d.fill[0].closed);
+  const lines = d.parts.filter((p) => !p.closed);
+  const horizontal = lines.filter((p) => p.pts[0][1] === p.pts[1][1]);
+  assert.equal(horizontal.length, 3, "header separator and two row separators");
+  const headerBottom = horizontal[0].pts[0][1];
+  assert.ok(d.label.y + d.label.h <= headerBottom, "title stays in the header");
+  const vertical = lines.find((p) => p.pts[0][0] === p.pts[1][0]);
+  assert.equal(vertical.pts[0][1], headerBottom, "key column starts below the title");
+  assert.equal(vertical.pts[1][1], 180);
 });

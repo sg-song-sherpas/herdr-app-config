@@ -193,8 +193,8 @@ export default class LinearSearch extends View {
       const matched = spacesFor(issue.identifier, spaces());
       if (matched.length) return run("space.select", { id: matched[0].id });
       if (issue.branchName) {
-        return openOverlay({ mod: "worktree", kind: "dialog", width: 440, height: 260,
-          props: { folder: REPO(), action: "new", branch: issue.branchName } });
+        return openOverlay({ mod: "worktree-codex", kind: "dialog", width: 460, height: 360,
+          props: { folder: REPO(), action: "new", issue: { identifier: issue.identifier, title: issue.title, branchName: issue.branchName } } });
       }
       return openUrl(issue.url);
     }
@@ -205,7 +205,9 @@ export default class LinearSearch extends View {
   }
 
   icon(t, state) {
-    return stateIcon(state, this.steps);
+    if (!CLOSED.has(state.type)) return stateIcon(state, this.steps);
+    return h_flex().size(14).flex_none().rounded(7).bg(state.color).items_center().justify_center()
+      .text_size(9).font_bold().text_color("#ffffff").child(state.type === "completed" ? "✓" : "✕");
   }
 
   row(t, issue, i) {

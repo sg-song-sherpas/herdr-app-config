@@ -18,7 +18,11 @@ async function mount(shapes) {
   const v = new Sketch();
   v.init({}, cx);
   await cx.settle();
-  await cx.flush(); // the pane takes the keyboard once it's shown
+  await cx.flush();
+  // Keyboard tests start after the user explicitly clicks the canvas.
+  const canvas = byId(v.render(), "sketch-canvas");
+  canvas.handlers["on_mouse_down:left"](mouse(-10000, -10000), cx);
+  canvas.handlers["on_mouse_up:left"](mouse(-10000, -10000), cx);
   return { v, cx };
 }
 
@@ -157,7 +161,7 @@ test("double-click a box and type to label it", async () => {
   down(v, cx, 90, 65, { click_count: 2 });
   assert.equal(v.editing, "a");
   v.input.type("Gateway", cx);
-  v.input.submit(cx);
+  byId(v.render(), "sketch-text-editor").handlers["on_action:sketch-text-finish"]({}, cx);
   assert.equal(v.shapes[0].text, "Gateway");
   assert.equal(v.editing, null);
 });
@@ -1178,8 +1182,8 @@ test("the palette has two sections: system parts, and notes and markers", async 
   const palette = text(byId(v.render(), "sketch-shapes"));
   assert.match(palette, /System.*Person.*Frame.*Notes and markers.*Note.*Bubble.*Idea.*Question.*Alert.*Gear.*Clock.*Lock.*Envelope.*Folder/s);
   const tiles = all(byId(v.render(), "sketch-shapes"), (e) => /^shape-/.test(e.props.id ?? "")).map((e) => e.props.id);
-  assert.equal(tiles.length, 19, "each shape once");
-  assert.equal(new Set(tiles).size, 19);
+  assert.equal(tiles.length, 22, "each shape once");
+  assert.equal(new Set(tiles).size, 22);
 });
 
 test("a new sticky note is yellow; with Fill on it takes the picked color instead", async () => {
@@ -1276,4 +1280,32 @@ test("double-clicking a picture shape edits its label", async () => {
   const { v, cx } = await mount([{ id: "d", type: "document", x: 0, y: 0, w: 110, h: 140 }]);
   down(v, cx, ...at(50, 70), { click_count: 2 });
   assert.equal(v.editing, "d");
+});
+
+
+test("DB Table can be picked, named, saved and connected by an arrow", async () => {
+  const { v, cx } = await mount([
+    { id: "db", type: "database", x: 450, y: 60, w: 110, h: 120 },
+  ]);
+  press(v, cx, "k");
+  const tile = byId(v.render(), "shape-db-table");
+  assert.ok(tile, "DB Table is offered in Shapes");
+  tile.handlers.on_click({}, cx);
+  down(v, cx, 180, 180); up(v, cx, 180, 180);
+  const table = v.shapes.find((s) => s.type === "db-table");
+  assert.ok(table);
+  assert.equal(table.w, 220);
+  assert.equal(table.h, 160);
+  press(v, cx, "enter");
+  v.input.type("software_installation", cx);
+  byId(v.render(), "sketch-text-editor").handlers["on_action:sketch-text-finish"]({}, cx);
+  assert.equal(table.text, "software_installation");
+  assert.match(text(byId(v.render(), "sketch-canvas")), /software_installation/);
+  press(v, cx, "a");
+  drag(v, cx, at(140, 140), at(500, 100));
+  const link = v.shapes.find((s) => s.type === "arrow");
+  assert.equal(link.from, table.id);
+  assert.equal(link.to, "db");
+  await cx.flush();
+  assert.ok(JSON.parse(host.files.get(FILE)).shapes.some((s) => s.type === "db-table" && s.text === "software_installation"));
 });

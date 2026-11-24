@@ -13,24 +13,29 @@
 // picture) · ⌘D duplicate · ⌘G / ⌘⇧G group, ungroup · ⌘A select all · 1–6 color · F fill · S dashed ·
 // (⌘D and ⌘⇧G come as commands, see keys.json) · right-click for a menu ·
 // ⌫ delete · ↵ / double-click edit text · ⌘Z / ⌘⇧Z undo/redo · ⇧1 fit · Esc deselect ·
+// While editing: Option+Enter inserts a newline; Enter finishes.
 // M hide or show the toolbar and hint line (remembered).
 // Pictures dropped from Finder are added too; each is kept as a PNG in the
 // board's images/ folder.
+// Mouse: Option+drag duplicates the selection and moves the copies.
 // Mouse: drag empty space to select the shapes inside a box, ⇧-click to add
 // or remove one, drag a selected shape to move the whole selection. Hold Space
 // (or the middle button) and drag to pan, scroll to pan, ⌘ or ctrl + scroll to
-// zoom. A lone selected shape has a handle on each corner of its outline, and
+// zoom; pinch on the trackpad zooms around its pointer. A lone selected shape
+// has a handle on each corner of its outline, and
 // each edge of the outline grabs too: drag one to
 // resize from that side (⇧ keeps a box's proportions; pictures always keep
 // theirs, and text scales its font).
 
 import { View, div, image, PathBuilder, Background } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input } from "gpui-base";
+import { h_flex, v_flex, TextareaState, Textarea } from "gpui-base";
 import { rng, roughLine, roughPolygon, roughPolyline, roughEllipse, roughCurve } from "./rough.js";
 import { ICONS, ICON_TYPES, FRAME_TITLE, SECTIONS, ROUND } from "./icons.js";
 import { appHome, home, readTextFile, writeTextFile, watchFolder, exec, theme, settings, nextCommand,
-  props, spaces, panes, focused } from "herdr";
+  props, spaces, panes, focused, setShared, run } from "herdr";
 import { boardSlug } from "./slug.js";
+import { DIFF_SAMPLE, parseDiff, diffColors, diffTargets } from "./diff.js";
+import { clone, makePopup, popupSize, resolveComment, rangeLabel, nestedShapes } from "./comments.js";
 
 export { boardSlug };
 
@@ -63,6 +68,7 @@ export const COLORS = [
 const TOOLS = [
   ["select", "v", "Select"], ["rect", "r", "Box"], ["ellipse", "o", "Ellipse"], ["diamond", "d", "Diamond"],
   ["arrow", "a", "Arrow"], ["line", "l", "Line"], ["pen", "p", "Pen"], ["text", "t", "Text"],
+  ["popup", "c", "Popup"],
 ];
 export const BOXY = new Set(["rect", "ellipse", "diamond", "text", "image", ...ICON_TYPES]);
 // Shapes that take a text label (double-click, Enter).
@@ -321,6 +327,7 @@ export function parse(text) {
 
 export default class Sketch extends View {
   init(_props, cx) {
+    this.embedded = _props?.embedded ?? null;
     this.shapes = [];
     this.tool = "select";
     this.color = 0;
@@ -351,14 +358,41 @@ export default class Sketch extends View {
     this.ranAt = {};        // when a key that also comes as a command last ran, by name
     this.menu = null;       // the right-click menu: { x, y } on screen, `at` in the world
     this.palette = false;   // the picture shapes palette (K, the Shapes button)
+    this.popupOpen = null;
+    this.popupEntity = null;
+    this.popupDrag = null;
+    this.diffSelection = null;
+    this.diffSelecting = false;
+    this.commentList = null;
     // Which board: set once the pane knows its worktree (locate()).
     this.rel = null;        // its folder, relative to the app's
     this.where = null;      // { root, machine, branch }, or null for the old shared board
     this.done = false;
     this.handle = cx.focus_handle();
-    this.input = InputState.new({ placeholder: "Text" });
-    this.input.on("submit", (_e, cx) => { this.finishEdit(cx); cx.notify(); });
-    cx.timer.after(300, () => this.handle.focus());
+    this.input = TextareaState.new({ placeholder: "Text", rows: 3 });
+    this.input.on("change", (_e, cx) => {
+      if (this.embedded) this.emitEmbedded(cx, true);
+      cx.notify();
+    });
+    // Override the native textarea's Enter action at the input's context:
+    // a submit listener runs after that action has already inserted a newline.
+    cx.bind_keys([
+      { keystroke: "enter", action: "sketch-text-finish", context: "SketchTextEditor > Input" },
+      { keystroke: "shift-enter", action: "sketch-text-finish", context: "SketchTextEditor > Input" },
+      { keystroke: "secondary-enter", action: "sketch-text-finish", context: "SketchTextEditor > Input" },
+      { keystroke: "alt-enter", action: "sketch-text-newline", context: "SketchTextEditor > Input" },
+    ]);
+    // Loading a board must leave the current tab and keyboard focus alone.
+    if (this.embedded) {
+      // A mini Sketch opens only in response to an explicit popup click.
+      cx.timer.after(300, () => { if (!this.editing) this.handle.focus(); });
+      this.rel = this.embedded.rel ?? LEGACY;
+      this.where = this.embedded.where ?? null;
+      this.shapes = clone(this.embedded.shapes ?? []);
+      this.bars = this.embedded.toolsVisible !== false;
+      if (this.embedded.editText && this.shapes[0]?.type === "text") this.startEdit(this.shapes[0]);
+      return;
+    }
     // Keys herdr takes for itself everywhere come as commands ("mod:Sketch" in
     // keys.json): ⌘D splits the pane anywhere else.
     cx.spawn(async (cx) => {
@@ -369,6 +403,9 @@ export default class Sketch extends View {
           // The same press may have reached the key handler too.
           if (Date.now() - (this.ranAt[c] ?? 0) > 250) this.act(c, cx);
           cx.notify();
+        } else if ((c === "duplicate" || c === "ungroup") && this.popupEntity) {
+          this.popupEntity.set_props({ command: c });
+          this.save(cx);
         }
       }
     });
@@ -396,6 +433,7 @@ export default class Sketch extends View {
         this.fileText = text;
         try {
           const next = parse(text);
+          this.closePopup(cx, false, false);
           this.remember();
           this.shapes = next;
           this.sel = this.sel.filter((id) => next.some((s) => s.id === id));
@@ -409,6 +447,19 @@ export default class Sketch extends View {
   }
 
   // ---- which board
+
+  async close(_cx) {
+    this.done = true;
+    this.saveSeq++;
+    this.popupOpen?.revealTask?.cancel();
+    this.popupEntity?.release();
+    if (this.embedded || !this.rel || this.error) return;
+    // Flush the latest popup draft, but preserve an external edit on shutdown.
+    const current = await readTextFile(this.file());
+    if (current !== this.fileText && current !== this.writing) return;
+    const text = serialize(this.shapes);
+    if (text !== current) await writeTextFile(this.file(), text, current);
+  }
 
   dir() { return `${appHome()}/${this.rel}`; }
   file() { return `${this.dir()}/board.json`; }
@@ -482,6 +533,9 @@ export default class Sketch extends View {
 
   restore(from, to, cx) {
     if (!from.length) return;
+    this.closePopup(cx, false);
+    this.diffSelection = null;
+    this.commentList = null;
     to.push(JSON.stringify(this.shapes));
     this.shapes = JSON.parse(from.pop());
     this.sel = this.sel.filter((id) => this.shapes.some((s) => s.id === id));
@@ -489,6 +543,7 @@ export default class Sketch extends View {
   }
 
   save(cx) {
+    if (this.embedded) { this.emitEmbedded(cx); return; }
     const seq = ++this.saveSeq;
     cx.timer.after(300, (cx) => {
       if (seq !== this.saveSeq) return;
@@ -509,6 +564,275 @@ export default class Sketch extends View {
     });
   }
 
+  emitEmbedded(cx, draft = false) {
+    const shapes = clone(this.shapes);
+    if (draft && this.editing) {
+      const s = shapes.find((s) => s.id === this.editing);
+      if (s) s.text = this.input.value();
+    }
+    this.embedded.onChange(shapes, cx);
+  }
+
+  popupTarget() {
+    const p = this.popupOpen;
+    const shape = p && this.shapes.find((s) => s.id === p.shapeId);
+    return p?.commentId ? shape?.comments?.find((c) => c.id === p.commentId) : shape;
+  }
+
+  popupWindowSize(popup, comment = Boolean(this.popupOpen?.commentId)) {
+    if (comment) return {
+      width: Math.min(320, Math.max(160, this.size.width - 16)),
+      height: this.popupOpen?.commentHeight ?? 80,
+    };
+    const requested = popupSize(popup);
+    return {
+      width: Math.min(requested.width, Math.max(280, this.size.width - 16)),
+      height: Math.min(requested.height, Math.max(240, this.size.height - 16)),
+    };
+  }
+
+  openPopup(shape, cx, comment = null, editText = false) {
+    this.closePopup(cx);
+    const target = comment ?? shape;
+    target.popup ??= makePopup();
+    target.popup.toolsVisible ??= this.bars;
+    const size = this.popupWindowSize(target.popup, Boolean(comment));
+    const b = norm(shape), [x, y] = this.screen([b.x + b.w, b.y]);
+    this.popupOpen = { shapeId: shape.id, commentId: comment?.id ?? null, ready: !comment,
+      x: clamp(x + 16, 8, Math.max(8, this.size.width - size.width - 8)),
+      y: clamp(y, 8, Math.max(8, this.size.height - size.height - 8)),
+    };
+    this.commentList = null;
+    if (comment) {
+      this.popupEntity = cx.new(CommentEditor, {
+        width: size.width,
+        maxHeight: Math.max(58, this.commentPosition(shape, comment, size).anchorY - 8),
+        shapes: target.popup.shapes,
+        onChange: (shapes, currentCx) => {
+          const target = this.popupTarget();
+          if (!target) return;
+          target.popup.shapes = shapes;
+          this.save(currentCx);
+        },
+      });
+      cx.notify();
+      return;
+    }
+    this.popupEntity = cx.new(MiniSketch, { embedded: {
+      rel: this.rel, where: this.where, shapes: target.popup.shapes, editText, toolsVisible: target.popup.toolsVisible,
+      onChange: (shapes, currentCx) => {
+        const target = this.popupTarget();
+        if (!target) return;
+        target.popup.shapes = shapes;
+        if (currentCx) this.save(currentCx);
+      },
+      onToolsChange: (visible, currentCx) => {
+        const target = this.popupTarget();
+        if (!target) return;
+        target.popup.toolsVisible = visible;
+        if (currentCx) {
+          this.save(currentCx);
+          // A child handles M; its parent owns the title-bar toggle.
+          // Refresh only for this explicit toggle, never for drawing or typing.
+          window.refresh?.();
+        }
+      },
+    } });
+    cx.notify();
+  }
+
+  closePopup(cx, save = true, restoreFocus = true) {
+    if (!this.popupEntity) return;
+    this.popupOpen?.revealTask?.cancel();
+    if (save) this.save(cx);
+    this.popupEntity.release();
+    this.popupEntity = null;
+    this.popupOpen = null;
+    this.popupDrag = null;
+    // External board updates also close popups, without selecting this pane.
+    if (restoreFocus) this.handle.focus();
+    cx.notify();
+  }
+
+  beginPopupDrag(e, cx, kind) {
+    cx.stop_propagation();
+    const p = this.popupOpen, target = this.popupTarget();
+    if (!p || !target || !e.position) return;
+    const size = this.popupWindowSize(target.popup);
+    const y = p.commentId && !p.moved ? p.anchorY - size.height : p.y;
+    this.popupDrag = { kind, start: e.position, x: p.x, y, ...size, before: JSON.stringify(this.shapes) };
+  }
+
+  movePopup(e, cx) {
+    const d = this.popupDrag, p = this.popupOpen, target = this.popupTarget();
+    if (!d || !p || !target || !e.position) return;
+    cx.stop_propagation();
+    const dx = (e.position.x - d.start.x) / this.scale(), dy = (e.position.y - d.start.y) / this.scale();
+    if (d.kind === "resize") {
+      target.popup.width = clamp(d.width + dx, 280, Math.max(280, this.size.width - p.x - 8));
+      target.popup.height = clamp(d.height + dy, 240, Math.max(240, this.size.height - p.y - 8));
+    } else {
+      p.moved = true;
+      const size = this.popupWindowSize(target.popup);
+      p.x = clamp(d.x + dx, 8, Math.max(8, this.size.width - size.width - 8));
+      p.y = clamp(d.y + dy, 8, Math.max(8, this.size.height - size.height - 8));
+    }
+    cx.notify();
+  }
+
+  endPopupDrag(cx) {
+    if (!this.popupDrag) return;
+    const d = this.popupDrag;
+    this.popupDrag = null;
+    if (d.kind === "resize" && JSON.stringify(this.shapes) !== d.before) {
+      this.undo.push(d.before); this.redo = [];
+      this.save(cx);
+    }
+    cx.notify();
+  }
+
+  selectDiffRow(shape, row, e, cx, extend = false) {
+    cx.stop_propagation();
+    if (extend && !this.diffSelecting) return;
+    if (this.diffSelection?.shapeId !== shape.id || (!extend && !e.modifiers?.shift)) {
+      this.diffSelection = { shapeId: shape.id, start: row, end: row };
+    } else this.diffSelection.end = row;
+    if (!extend) this.diffSelecting = true;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  addDiffComment(shape, cx) {
+    const selection = this.diffSelection;
+    if (selection?.shapeId !== shape.id) return;
+    const rows = parseDiff(shape.text).rows;
+    const start = Math.min(selection.start, selection.end), end = Math.max(selection.start, selection.end);
+    if (!rows[start] || !rows[end]) return;
+    this.remember();
+    const comment = { id: newId(), startRow: start, endRow: end, quote: rows.slice(start, end + 1).map((r) => r.text),
+      popup: makePopup([{ id: newId(), type: "text", x: 0, y: 0, text: "" }]) };
+    shape.comments = [...(shape.comments ?? []), comment];
+    this.diffSelecting = false;
+    this.diffSelection = null;
+    this.save(cx);
+    this.openPopup(shape, cx, comment, true);
+  }
+
+  popupBackdrop(id) {
+    const dismiss = (_e, cx) => { cx.stop_propagation(); this.closePopup(cx); };
+    return div().id(id).absolute().top(0).left(0).size_full().bg("#00000000")
+      .on_mouse_down("left", dismiss).on_mouse_down("right", dismiss);
+  }
+
+  commentPosition(shape, comment, size) {
+    const b = norm(shape), rows = parseDiff(shape.text).rows;
+    const range = resolveComment(comment, rows);
+    const lineHeight = Math.max(8, shape.fontSize ?? 13) * 1.55;
+    const [x, start] = this.screen([b.x + 26, b.y + 38 + (range?.[0] ?? 0) * lineHeight]);
+
+    return {
+      x: clamp(x, 8, Math.max(8, this.size.width - size.width - 8)),
+      // Anchor the native layout by its bottom; intrinsic height never changes sides.
+      anchorY: start - 8,
+    };
+  }
+
+  drawPopup(out) {
+    const p = this.popupOpen, target = this.popupTarget();
+    if (!p || !target || !this.popupEntity) return;
+    const t = this.t, size = this.popupWindowSize(target.popup);
+    const shape = this.shapes.find((s) => s.id === p.shapeId);
+    const rows = p.commentId ? parseDiff(shape.text).rows : null;
+    const range = rows && resolveComment(target, rows);
+    const title = p.commentId ? `댓글 · ${range ? rangeLabel(rows, ...range) : "변경된 줄"}` : shape.text || "Popup Sketch";
+    const stop = (_e, cx) => cx.stop_propagation();
+    const anchored = Boolean(p.commentId && !p.moved);
+    const position = anchored ? this.commentPosition(shape, target, size) : p;
+    const left = clamp(position.x, 8, Math.max(8, this.size.width - size.width - 8));
+    const top = anchored ? null : clamp(position.y, 8, Math.max(8, this.size.height - size.height - 8));
+    if (anchored) { p.x = left; p.anchorY = position.anchorY; }
+    // Catch clicks on this Sketch only; the popup is painted above this layer.
+    out.push(this.popupBackdrop("sketch-popup-backdrop"));
+    const popup = v_flex().id("sketch-popup-window").absolute().left(anchored ? 0 : left).w(size.width)
+      .when(anchored, (el) => el.bottom(0))
+      .when(!anchored, (el) => el.top(top))
+      .when(!p.commentId, (el) => el.h(size.height))
+      .when(Boolean(p.commentId), (el) => el
+        .opacity(p.ready ? 1 : 0)
+        .max_h(anchored ? Math.max(58, position.anchorY - 8) : Math.max(80, this.size.height - 16))
+        .on_size_change((measured, cx) => {
+          const height = measured.height / this.scale();
+          if (Math.abs(height - (p.commentHeight ?? 0)) < 0.5) return;
+          p.commentHeight = height;
+          if (p.ready) return;
+          p.revealTask?.cancel();
+          const revision = p.revealRevision = (p.revealRevision ?? 0) + 1;
+          // Layout still runs at opacity zero. Restart only while the opening textarea is settling.
+          p.revealTask = cx.timer.after(50, (cx) => {
+            if (this.done || this.popupOpen !== p || p.revealRevision !== revision) return;
+            p.ready = true;
+            p.revealTask = null;
+            cx.notify();
+          });
+        }))
+      .rounded(10).border(2).border_color(SELECT).bg(t.background).shadow_lg().overflow_hidden()
+      .on_mouse_down("left", stop).on_mouse_down("right", stop)
+      .when(Boolean(p.commentId), (el) => el
+        .on_mouse_down_out((_e, cx) => this.closePopup(cx))
+        .on_key_down((e, cx) => {
+          if (e.keystroke === "escape") this.closePopup(cx);
+          cx.stop_propagation();
+        }))
+      .on_scroll_wheel(stop).when(true, (el) => typeof el.on_pinch === "function" ? el.on_pinch(stop) : el)
+      .on_mouse_move((e, cx) => { if (this.popupDrag) this.movePopup(e, cx); cx.stop_propagation(); })
+      .on_mouse_up("left", (_e, cx) => { this.endPopupDrag(cx); cx.stop_propagation(); })
+      .child(h_flex().id("sketch-popup-title").h(34).flex_shrink_0().px(10).gap(8).items_center().bg(t.chrome).cursor_grab()
+        .on_mouse_down("left", (e, cx) => this.beginPopupDrag(e, cx, "move"))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(title))
+        .when(size.width >= 420, (el) => el.child(div().text_size(10).text_color(t.dim).child(`${Math.round(size.width)} × ${Math.round(size.height)}`)))
+        .when(!p.commentId, (el) => el.child(this.button("sketch-popup-tools", target.popup.toolsVisible === false ? "도구 보기" : "도구 숨기기", false, (cx) => {
+          target.popup.toolsVisible = target.popup.toolsVisible === false;
+          this.popupEntity.set_props({ toolsVisible: target.popup.toolsVisible });
+          this.save(cx);
+        })))
+        .when(Boolean(p.commentId), (el) => el.child(this.button("sketch-popup-delete-comment", "댓글 삭제", false, (cx) => {
+          this.remember();
+          shape.comments = shape.comments.filter((c) => c.id !== p.commentId);
+          this.closePopup(cx, false);
+          this.save(cx);
+        })))
+        .child(this.button("sketch-popup-close", "닫기 ×", false, (cx) => this.closePopup(cx))))
+      .child(div().min_h(0).overflow_hidden()
+        .when(!p.commentId, (el) => el.flex_1())
+        .when(Boolean(p.commentId), (el) => el.w_full().flex_shrink_0())
+        .child(this.popupEntity))
+      .when(!p.commentId, (el) => el.child(div().id("sketch-popup-resize").absolute().bottom(0).right(0).size(20).cursor_nwse_resize()
+        .text_size(16).text_color(SELECT).child("◢")
+        .on_mouse_down("left", (e, cx) => this.beginPopupDrag(e, cx, "resize"))));
+    // A zero-height anchor avoids depending on a stale canvas height or a measured popup height.
+    out.push(anchored ? div().id("sketch-comment-anchor").absolute().left(left).top(position.anchorY)
+      .w(size.width).h(0).child(popup) : popup);
+  }
+
+  drawCommentList(out) {
+    const shape = this.shapes.find((s) => s.id === this.commentList);
+    if (!shape) return;
+    const rows = parseDiff(shape.text).rows, t = this.t;
+    const [x, y] = this.screen([shape.x, shape.y]);
+    out.push(v_flex().id("sketch-comment-list").absolute().left(clamp(x, 8, Math.max(8, this.size.width - 320)))
+      .top(clamp(y + 36, 8, Math.max(8, this.size.height - 240))).w(312).max_h(240).overflow_y_scrollbar()
+      .p(8).gap(4).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child(this.button("sketch-comment-list-close", "댓글 목록 닫기", false, () => { this.commentList = null; }))
+      .children((shape.comments ?? []).map((c) => {
+        const range = resolveComment(c, rows);
+        const preview = c.popup?.shapes?.find((s) => s.type === "text")?.text || "Sketch 댓글";
+        return div().id(`sketch-comment-${c.id}`).px(8).py(6).rounded(5).cursor_pointer().hover((el) => el.bg(t.hover))
+          .text_size(12).text_color(t.foreground).child(`${range ? rangeLabel(rows, ...range) : "변경된 줄"} · ${preview}`)
+          .on_click((_e, cx) => this.openPopup(shape, cx, c));
+      })));
+  }
+
   hitAt(p) {
     const byId = this.byId();
     const tol = 6 / this.zoom;
@@ -525,6 +849,7 @@ export default class Sketch extends View {
   }
 
   startEdit(s) {
+    if (s.type === "diff") { this.diffSelection = null; this.diffSelecting = false; }
     this.editing = s.id;
     this.sel = [s.id];
     this.input.set_value(s.text ?? "");
@@ -550,9 +875,21 @@ export default class Sketch extends View {
     if (fillable.length) this.style(cx, () => ({ fill: this.fill ? COLORS[this.color][1] : null }), fillable);
   }
 
-  toggleBars() {
-    this.bars = !this.bars;
-    localStorage.setItem("bars", this.bars ? "shown" : "hidden");
+  setToolsVisible(visible, cx) {
+    this.bars = visible;
+    if (!visible) this.palette = false;
+    if (this.embedded) this.embedded.onToolsChange?.(visible, cx);
+    else localStorage.setItem("bars", visible ? "shown" : "hidden");
+    if (this.popupEntity) {
+      const target = this.popupTarget();
+      if (target) target.popup.toolsVisible = visible;
+      this.popupEntity.set_props({ toolsVisible: visible });
+      if (cx) this.save(cx);
+    }
+  }
+
+  toggleBars(cx) {
+    this.setToolsVisible(!this.bars, cx);
   }
 
   toggleRough() {
@@ -611,6 +948,7 @@ export default class Sketch extends View {
 
   down(e, cx) {
     cx.stop_propagation();
+    if (this.popupEntity) { this.closePopup(cx); return; }
     // A press outside an open menu only closes it.
     if (this.menu) { this.menu = null; return; }
     this.palette = false;
@@ -633,7 +971,7 @@ export default class Sketch extends View {
 
     if (this.tool === "select") {
       const sel = this.selected();
-      if (sel && BOXY.has(sel.type)) {
+      if (sel && BOXY.has(sel.type) && !e.modifiers?.alt) {
         const b = bbox(sel);
         const o = this.outline(b);
         const along = (v, a, b) => v >= a && v <= b;
@@ -650,8 +988,8 @@ export default class Sketch extends View {
         }
       }
       const s = this.hitAt(p);
-      const shift = Boolean(e.modifiers?.shift);
-      if (s && e.click_count >= 2 && labeled(s)) { this.startEdit(s); return; }
+      const shift = Boolean(e.modifiers?.shift) && !e.modifiers?.alt;
+      if (s && e.click_count >= 2 && labeled(s) && !e.modifiers?.alt) { this.startEdit(s); return; }
       if (s && shift) {
         const members = new Set(this.withGroups([s.id]));
         this.sel = this.sel.includes(s.id) ? this.sel.filter((id) => !members.has(id)) : this.withGroups([...this.sel, s.id]);
@@ -659,7 +997,7 @@ export default class Sketch extends View {
       }
       if (s) {
         if (!this.sel.includes(s.id)) this.sel = this.withGroups([s.id]);
-        this.drag = { ...this.moving(p), clicked: s.id };
+        this.drag = { ...this.moving(p), clicked: s.id, copyPending: Boolean(e.modifiers?.alt) };
       } else {
         // A box from here selects what it covers; ⇧ adds to the selection.
         this.drag = { kind: "marquee", start: p, end: p, base: shift ? [...this.sel] : [] };
@@ -683,6 +1021,8 @@ export default class Sketch extends View {
       // Fill on: the picked color's. Off: a sticky note is still yellow.
       const fill = this.fill ? COLORS[this.color][1] : ICONS[this.tool]?.fill;
       s = { id: newId(), type: this.tool, x: p[0], y: p[1], w: 0, h: 0, ...style, ...(fill ? { fill } : {}) };
+      if (s.type === "diff") s.text = DIFF_SAMPLE;
+      if (s.type === "popup") { s.text = "Popup"; s.popup = makePopup(); }
     }
     if (s.type === "frame") {
       // A frame goes behind everything but other frames, and is dashed.
@@ -740,7 +1080,7 @@ export default class Sketch extends View {
     // Pictures from another board: copies of their files come into this one's.
     if (from && from !== this.rel && this.rel) {
       const files = [];
-      for (const s of list) {
+      for (const s of nestedShapes(list)) {
         if (s.type !== "image" || typeof s.src !== "string") continue;
         const name = `images/${newId()}.png`;
         files.push([`${appHome()}/${from}/${s.src}`, `${this.dir()}/${name}`]);
@@ -829,7 +1169,7 @@ export default class Sketch extends View {
       case "select-all": this.sel = this.shapes.map((s) => s.id); this.tool = "select"; break;
       case "fit": this.fit(); break;
       case "rough": this.toggleRough(); break;
-      case "bars": this.toggleBars(); break;
+      case "bars": this.toggleBars(cx); break;
     }
   }
 
@@ -1001,6 +1341,7 @@ export default class Sketch extends View {
   }
 
   move(e, cx) {
+    if (this.popupDrag) { this.movePopup(e, cx); return; }
     this.measure(e);
     const d = this.drag;
     if (!d) return;
@@ -1013,6 +1354,15 @@ export default class Sketch extends View {
       d.end = p;
     } else if (d.kind === "move") {
       const dx = p[0] - d.start[0], dy = p[1] - d.start[1];
+      if (d.copyPending) {
+        // A click or tiny pointer jitter must not create a copy. Clone once,
+        // then move only the copies, keeping this whole gesture one undo step.
+        if (Math.hypot(dx, dy) * this.zoom < 3) return;
+        const added = placed(detach(this.selection(), this.byId()), 0, 0);
+        this.shapes.push(...added);
+        this.sel = added.map((s) => s.id);
+        Object.assign(d, this.moving(d.start), { before: d.before, copyPending: false, clicked: null });
+      }
       for (const { s, orig, keep } of d.items) {
         if ("x" in orig) { s.x = orig.x + dx; s.y = orig.y + dy; }
         if (orig.points) {
@@ -1055,6 +1405,8 @@ export default class Sketch extends View {
   }
 
   up(_e, cx) {
+    if (this.popupDrag) { this.endPopupDrag(cx); return; }
+    this.diffSelecting = false;
     const d = this.drag;
     this.drag = null;
     if (!d) return;
@@ -1079,7 +1431,11 @@ export default class Sketch extends View {
     }
     if (d.kind === "move" || d.kind === "resize") {
       // A click (no drag) on a shape in a larger selection picks just that one.
-      if (d.kind === "move" && JSON.stringify(this.shapes) === d.before && d.clicked) this.sel = this.withGroups([d.clicked]);
+      if (d.kind === "move" && JSON.stringify(this.shapes) === d.before && d.clicked) {
+        this.sel = this.withGroups([d.clicked]);
+        const clicked = this.shapes.find((s) => s.id === d.clicked);
+        if (clicked?.type === "popup" && !d.copyPending) this.openPopup(clicked, cx);
+      }
       if (JSON.stringify(this.shapes) !== d.before) {
         this.undo.push(d.before);
         this.redo = [];
@@ -1111,6 +1467,23 @@ export default class Sketch extends View {
       this.sel = [s.id];
     }
     this.save(cx);
+    if (s.type === "popup") this.openPopup(s, cx);
+  }
+
+  zoomAt(e, factor) {
+    const l = this.local(e) ?? { x: this.size.width / 2, y: this.size.height / 2 };
+    const z = clamp(this.zoom * factor, 0.1, 6);
+    this.pan = { x: l.x - (l.x - this.pan.x) * (z / this.zoom), y: l.y - (l.y - this.pan.y) * (z / this.zoom) };
+    this.zoom = z;
+  }
+
+  pinch(e, cx) {
+    cx.stop_propagation();
+    if (e.touch_phase === "cancelled" || !Number.isFinite(e.delta) || e.delta <= -1 || e.delta === 0) return;
+    this.measure(e);
+    this.menu = null;
+    this.zoomAt(e, 1 + e.delta);
+    cx.notify();
   }
 
   wheel(e, cx) {
@@ -1118,10 +1491,7 @@ export default class Sketch extends View {
     this.menu = null;
     cx.stop_propagation();
     if (e.modifiers.platform || e.modifiers.control) {
-      const l = this.local(e) ?? { x: this.size.width / 2, y: this.size.height / 2 };
-      const z = clamp(this.zoom * Math.exp(e.delta.y * 0.01), 0.1, 6);
-      this.pan = { x: l.x - (l.x - this.pan.x) * (z / this.zoom), y: l.y - (l.y - this.pan.y) * (z / this.zoom) };
-      this.zoom = z;
+      this.zoomAt(e, Math.exp(e.delta.y * 0.01));
     } else {
       this.pan = { x: this.pan.x + e.delta.x / this.scale(), y: this.pan.y + e.delta.y / this.scale() };
     }
@@ -1141,7 +1511,11 @@ export default class Sketch extends View {
       return;
     }
     if (this.editing) {
-      if (k === "escape") { this.finishEdit(cx); cx.stop_propagation(); cx.notify(); }
+      if (k === "escape") {
+        this.finishEdit(cx);
+        cx.stop_propagation();
+        cx.notify();
+      }
       return;
     }
     if (this.menu && k === "escape") { this.menu = null; cx.stop_propagation(); cx.notify(); return; }
@@ -1163,7 +1537,7 @@ export default class Sketch extends View {
     else if (k === "f") this.toggleFill(cx);
     else if (k === "k") this.palette = !this.palette;
     else if (k === "h") this.toggleRough();
-    else if (k === "m") this.toggleBars();
+    else if (k === "m") this.toggleBars(cx);
     else if (k === "s") {
       this.dashed = many.length ? !many[0].dashed : !this.dashed;
       this.style(cx, { dashed: this.dashed || null });
@@ -1215,6 +1589,10 @@ export default class Sketch extends View {
       const b = norm(s);
       const [x, y] = this.screen([b.x, b.y]);
       out.push(image(`${this.rel ?? LEGACY}/${s.src}`).absolute().left(x).top(y).w(b.w * z).h(b.h * z));
+      return;
+    }
+    if (s.type === "diff") {
+      this.paintDiff(s, out);
       return;
     }
     if (ICONS[s.type]) {
@@ -1331,14 +1709,118 @@ export default class Sketch extends View {
     this.lineLabel(s, pts, ink, out);
   }
 
+  openDiffCode(target, cx) {
+    if (!target || !this.where?.root) return;
+    const f = focused(), space = spaces().find(s => s.active);
+    setShared("files.navigation", { ...target, root: this.where.root, on: this.where.machine ?? null,
+      space: f?.space ?? space?.id, tab: f?.tab ?? null, nonce: `${Date.now()}-${this.codeNavigationSeq = (this.codeNavigationSeq ?? 0) + 1}` });
+    run("layout.select", { stack: "panel-body", child: "files" });
+    run("layout.show", { id: "panel" });
+    cx.notify();
+  }
+
+  // Diff cards render only the rows that fit; parsed text is cached until edited.
+  paintDiff(s, out) {
+    const b = norm(s), z = this.zoom;
+    if (b.w < 1 || b.h < 1) return;
+    const [x, y] = this.screen([b.x, b.y]), c = diffColors(this.dark);
+    this.diffCache ??= new WeakMap();
+    let data = this.diffCache.get(s);
+    if (!data || data.text !== s.text) {
+      data = { text: s.text, parsed: parseDiff(s.text), targets: diffTargets(s.text) };
+      this.diffCache.set(s, data);
+    }
+    const { title, rows } = data.parsed;
+    if (data.comments !== s.comments) {
+      data.comments = s.comments;
+      data.anchors = new Map();
+      for (const comment of s.comments ?? []) {
+        const range = resolveComment(comment, rows);
+        if (range) {
+          const list = data.anchors.get(range[1]) ?? [];
+          list.push(comment);
+          data.anchors.set(range[1], list);
+        }
+      }
+    }
+    const size = Math.max(8, s.fontSize ?? 13), lineHeight = size * 1.55;
+    const headerHeight = 32, padding = 6;
+    const capacity = Math.min(200, Math.max(0, Math.floor((b.h - headerHeight - padding * 2 - 18) / lineHeight)));
+    const count = rows.length > capacity ? Math.max(0, capacity - 1) : rows.length;
+    const numbersWidth = Math.max(3, String(Math.max(...rows.slice(0, count).flatMap((r) => [r.old || 0, r.next || 0]))).length) * size * 0.62;
+    const card = div().id(`diff-${s.id}`).absolute().left(x).top(y).w(b.w * z).h(b.h * z)
+      .overflow_hidden().rounded(6 * z).border(1 * z).border_color(c.border).bg(c.background)
+      .font_family("Menlo").text_size(size * z).text_color(c.text);
+    const selection = this.diffSelection?.shapeId === s.id ? this.diffSelection : null;
+    const codeTarget = data.targets[selection ? Math.min(selection.start, selection.end) : data.targets.findIndex(Boolean)];
+    card.child(h_flex().absolute().left(0).top(0).w(b.w * z).h(headerHeight * z).px(8 * z).gap(4)
+      .items_center().bg(c.header).font_semibold().whitespace_nowrap().overflow_hidden()
+      .child(div().flex_1().min_w(0).truncate().child(title))
+      .when(Boolean(codeTarget && this.where?.root), el => el.child(this.button(`diff-${s.id}-code`, "코드 ↗", false,
+        cx => this.openDiffCode(codeTarget, cx))))
+      .when(Boolean(s.comments?.length), (el) => el.child(this.button(`diff-${s.id}-comments`, `댓글 ${s.comments.length}`,
+        this.commentList === s.id, () => { this.commentList = this.commentList === s.id ? null : s.id; }))));
+    if (this.editing !== s.id) {
+      for (let i = 0; i < count; i++) {
+        const row = rows[i], [bg, ink] = c[row.kind] ?? [c.background, c.text];
+        const selectable = ["add", "remove", "context"].includes(row.kind);
+        const selected = selection && i >= Math.min(selection.start, selection.end) && i <= Math.max(selection.start, selection.end);
+        const comments = data.anchors?.get(i) ?? [];
+        const endOfSelection = selection && i === Math.max(selection.start, selection.end);
+        card.child(h_flex().id(`diff-${s.id}-row-${i}`).absolute().left(0)
+          .top((headerHeight + padding + i * lineHeight) * z).w(b.w * z).h(lineHeight * z)
+          .items_center().pl(52 * z).bg(bg).text_color(ink).whitespace_nowrap().overflow_hidden()
+          .when(Boolean(selected), (el) => el.border_l(3 * z).border_color(SELECT))
+          .child(h_flex().id(`diff-${s.id}-select-${i}`).flex_shrink_0().items_center().h(lineHeight * z)
+            .when(selectable, (el) => el.cursor_pointer()
+              .on_mouse_down("left", (e, cx) => this.selectDiffRow(s, i, e, cx))
+              .on_mouse_move((e, cx) => this.selectDiffRow(s, i, e, cx, true))
+              .on_mouse_up("left", (_e, cx) => { this.diffSelecting = false; cx.stop_propagation(); cx.notify(); }))
+            .child(div().w(numbersWidth * z).text_right().text_color(c.muted).child(String(row.old)))
+            .child(div().id(`diff-${s.id}-number-gap-${i}`).w(size * 0.62 * z).flex_shrink_0().child(" "))
+            .child(div().w((numbersWidth + 8) * z).pr(8 * z).text_right().text_color(c.muted).child(String(row.next))))
+          .child(div().flex_shrink_0().child(row.text.replace(/\t/g, "    ")))
+          .when(Boolean(data.targets[i] && this.where?.root), el => el.child(div().id(`diff-${s.id}-code-${i}`)
+            .absolute().right(0).top(0).w(26 * z).h(lineHeight * z).bg(bg).text_center().cursor_pointer().child("↗")
+            .tooltip(`Files · ${data.targets[i].path}:${data.targets[i].line}`)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => this.openDiffCode(data.targets[i], cx))))
+          .when(Boolean(comments.length), (el) => el.child(div().absolute().left(0).top(0).h(lineHeight * z)
+            .w(26 * z).bg(SELECT).text_color("#ffffff").text_center().cursor_pointer().child(`●${comments.length > 1 ? comments.length : ""}`)
+            .id(`diff-${s.id}-comment-${comments[0].id}`)
+            .tooltip("댓글 열기")
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => {
+              if (comments.length === 1) this.openPopup(s, cx, comments[0]);
+              else { this.commentList = s.id; cx.notify(); }
+            })))
+          .when(Boolean(endOfSelection), (el) => el.child(div().id(`diff-${s.id}-add-comment`).absolute().left(26 * z).top(0)
+            .w(26 * z).h(lineHeight * z).bg(SELECT).text_color("#ffffff").text_center().cursor_pointer().child("+")
+            .tooltip(`댓글 추가 · ${rangeLabel(rows, Math.min(selection.start, selection.end), Math.max(selection.start, selection.end))}`)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => this.addDiffComment(s, cx)))));
+      }
+      if (rows.length > count && capacity > 0) {
+        card.child(div().absolute().left(10 * z).top((headerHeight + padding + count * lineHeight) * z)
+          .h(lineHeight * z).text_color(c.muted).whitespace_nowrap().child(`… ${rows.length - count} more lines · resize to show more`));
+      }
+      if (!rows.length) card.child(div().absolute().left(10 * z).top((headerHeight + padding) * z)
+        .text_color(c.muted).child("Double-click to paste a unified diff"));
+      else card.child(div().absolute().left(8 * z).bottom(3 * z).text_size(10 * z).text_color(c.muted)
+        .whitespace_nowrap().child("줄 번호를 드래그하거나 Shift+클릭 → 왼쪽 +"));
+    }
+    out.push(card);
+  }
+
   // A line or arrow's label, at its middle (screen points).
   lineLabel(s, pts, ink, out) {
     const z = this.zoom;
     if (s.text) {
       const mid = pts[Math.floor(pts.length / 2) - (pts.length % 2 ? 0 : 1)], end = pts[Math.floor(pts.length / 2)];
       const mx = (mid[0] + end[0]) / 2, my = (mid[1] + end[1]) / 2;
-      out.push(div().absolute().left(mx - 80 * z).top(my - 11 * z).w(160 * z).flex().justify_center()
-        .child(div().px(4 * z).bg(this.t.background).text_size(13 * z).text_color(ink).child(this.editing === s.id ? "" : s.text)));
+      const label = textSize(s), width = Math.max(160, label.w + 8) * z;
+      out.push(div().absolute().left(mx - width / 2).top(my - label.h * z / 2).w(width).flex().justify_center()
+        .child(div().px(4 * z).bg(this.t.background).text_size((s.fontSize ?? FONT) * z).text_color(ink).child(this.editing === s.id ? "" : s.text)));
     }
   }
 
@@ -1402,17 +1884,31 @@ export default class Sketch extends View {
     const b = bbox(s, byId);
     let [x, y] = this.screen([b.x, b.y]);
     let w = Math.max(180, b.w * this.zoom);
-    if (s.type !== "text") { x += (b.w * this.zoom - w) / 2; y += (b.h * this.zoom) / 2 - 16; }
-    out.push(div().absolute().left(x).top(y).w(w).h(32).px(6).rounded(6).border_1().border_color(SELECT).bg(this.t.popover)
+    const isDiff = s.type === "diff";
+    if (isDiff) { y += 32 * this.zoom; }
+    else if (s.type !== "text") { x += (b.w * this.zoom - w) / 2; y += (b.h * this.zoom) / 2 - 16; }
+    out.push(div().id("sketch-text-editor").key_context("SketchTextEditor")
+      .absolute().left(x).top(y).w(w).h(isDiff ? Math.min(360, Math.max(160, (b.h - 32) * this.zoom)) : 88).px(6).rounded(6).border_1().border_color(SELECT).bg(this.t.popover)
+      .on_action("sketch-text-finish", (_e, cx) => {
+        this.finishEdit(cx);
+        cx.stop_propagation();
+        cx.notify();
+      })
+      .on_action("sketch-text-newline", (_e, cx) => {
+        this.input.replace("\n");
+        cx.stop_propagation();
+        cx.notify();
+      })
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(Input.new(this.input).size_full().text_size(14).text_color(this.t.foreground)));
+      .child(Textarea.new(this.input).size_full().text_size(14).text_color(this.t.foreground)
+        .when(isDiff, (el) => el.font_family("Menlo"))));
   }
 
   button(id, label, active, onClick) {
     return div().id(id).h(26).px(8).flex().items_center().rounded(6).text_size(12).cursor_pointer()
       .text_color(active ? "#ffffff" : this.t.foreground).bg(active ? SELECT : "#00000000").hover((el) => (active ? el : el.bg(this.t.hover)))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { onClick(cx); this.handle.focus(); cx.notify(); })
+      .on_click((_e, cx) => { onClick(cx); if (!this.popupEntity) this.handle.focus(); cx.notify(); })
       .child(label);
   }
 
@@ -1428,6 +1924,8 @@ export default class Sketch extends View {
     this.editor(layers);
     this.drawMenu(layers);
     this.drawPalette(layers);
+    this.drawCommentList(layers);
+    this.drawPopup(layers);
     const first = this.selection()[0];
     const cursor = this.drag?.kind === "pan" ? "grabbing" : this.spaceStillDown() ? "grab" : this.tool === "select" ? "default" : "crosshair";
 
@@ -1451,7 +1949,8 @@ export default class Sketch extends View {
       .child(div().flex_1())
       .child(div().text_size(11).text_color(t.dim).child(status))
       .child(this.button("fit", "Fit ⇧1", false, () => this.fit()))
-      .child(this.button("hide-bars", "Hide M", false, () => this.toggleBars()));
+      .child(this.button("hide-bars", "도구 숨기기 M", false, (cx) => this.toggleBars(cx)))
+      .when(Boolean(this.popupEntity), (el) => el.relative().child(this.popupBackdrop("sketch-popup-toolbar-backdrop")));
 
     const canvas = div().id("sketch-canvas").relative().flex_1().min_h(0).overflow_hidden().bg(t.background)
       .when(cursor === "crosshair", (el) => el.cursor_crosshair())
@@ -1468,18 +1967,24 @@ export default class Sketch extends View {
       .on_mouse_up("left", (e, cx) => { this.up(e, cx); cx.notify(); })
       .on_mouse_up("middle", (_e, cx) => { this.drag = null; cx.notify(); })
       .on_scroll_wheel((e, cx) => this.wheel(e, cx))
+      // An app already running during an upgrade may still have the older API.
+      .when(true, (el) => typeof el.on_pinch === "function" ? el.on_pinch((e, cx) => this.pinch(e, cx)) : el)
       .on_drop((e, cx) => { const pics = (e.paths ?? []).filter((f) => PICTURE.test(f)); if (pics.length) this.addImages(pics, cx); })
       .children(layers)
       .when(!this.shapes.length, (el) => el.child(div().absolute().top(0).left(0).size_full().flex().items_center().justify_center()
         .text_color(t.dim).text_size(14).child("Pick a tool (R box, A arrow, P pen, T text, K person, database, server…) and drag here.")))
       // Bars hidden: one small button in the corner brings them back (and a note, if any).
-      .when(!this.bars, (el) => el.child(h_flex().absolute().top(8).right(8).gap(8).items_center()
+      .when(!this.bars && !this.embedded, (el) => el.child(h_flex().absolute().top(8).right(8).gap(8).items_center()
         .when(Boolean(this.error ?? this.note), (row) => row.child(div().text_size(11).text_color(t.dim).child(this.error ?? this.note)))
         .child(div().id("show-bars").h(24).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).bg(t.chrome)
           .text_size(11).text_color(t.muted).cursor_pointer().hover((b) => b.bg(t.hover).text_color(t.foreground))
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_click((_e, cx) => { this.toggleBars(); this.handle.focus(); cx.notify(); })
-          .child("Show toolbar M"))));
+          .on_click((_e, cx) => {
+            if (this.popupEntity) this.closePopup(cx);
+            else this.toggleBars(cx);
+            this.handle.focus(); cx.notify();
+          })
+          .child("도구 보기 M"))));
 
     return v_flex().id("sketch").track_focus(this.handle).size_full().bg(t.background).overflow_hidden()
       .on_key_down((e, cx) => this.key(e, cx))
@@ -1487,9 +1992,60 @@ export default class Sketch extends View {
       .when(this.bars, (el) => el.child(toolbar))
       .child(canvas)
       .when(this.bars, (el) => el.child(h_flex().id("sketch-hints").flex_none().h(24).px(10).items_center().gap(12).border_t(1).border_color(t.border).bg(t.chrome)
+        .on_mouse_down("left", (_e, cx) => { if (this.popupEntity) { cx.stop_propagation(); this.closePopup(cx); } })
         .text_size(11).text_color(t.dim)
-        .child("drag to select · ⇧-click adds · Space+drag or scroll to pan · ⌘ scroll to zoom · double-click for text · ⌘C ⌘V copy/paste · ⌘D duplicate · ⌘G group · right-click for more · drag corners or edges to resize · ⌫ delete · ⌘Z undo · M hide bars")
+        .child("drag to select · ⌥-drag duplicates · ⇧-click adds · Space+drag or scroll to pan · pinch or ⌘ scroll to zoom · double-click for text · ⌥↵ newline · ↵ finish editing · ⌘C ⌘V copy/paste · ⌘D duplicate · ⌘G group · right-click for more · drag corners or edges to resize · ⌫ delete · ⌘Z undo · M hide bars")
         .child(div().flex_1())
         .child(this.boardLabel())));
+  }
+}
+
+// Only the open popup owns a nested view. It reuses the canvas tools and never
+// starts a file watcher or a second command reader.
+export class MiniSketch extends Sketch {
+  update(p) {
+    if (typeof p?.toolsVisible === "boolean") { this.setToolsVisible(p.toolsVisible, null); return; }
+    if (!p?.command) return;
+    if (this.popupEntity) { this.popupEntity.set_props(p); return; }
+    if (this.editing) return;
+    if (p.command === "duplicate" && this.can("duplicate")) {
+      this.remember();
+      const added = placed(detach(this.selection(), this.byId()), STEP, STEP);
+      this.shapes.push(...added);
+      this.sel = added.map((s) => s.id);
+    } else if (p.command === "ungroup" && this.can("ungroup")) {
+      this.remember();
+      for (const s of this.selection()) delete s.group;
+    } else return;
+    this.emitEmbedded(null);
+  }
+}
+
+// Diff comments edit text directly; legacy popup drawings remain in the board.
+export class CommentEditor extends View {
+  init(p) {
+    this.width = p.width - 4;
+    this.maxInputHeight = Math.max(20, p.maxHeight - 58);
+    this.shapes = clone(p.shapes ?? []);
+    let text = this.shapes.find((s) => s.type === "text");
+    if (!text) {
+      text = { id: newId(), type: "text", x: 0, y: 0, text: "" };
+      this.shapes.push(text);
+    }
+    this.input = TextareaState.new({ placeholder: "댓글을 입력하세요", rows: 1, value: text.text ?? "" });
+    this.input.set_soft_wrap(true);
+    this.input.set_auto_grow(1, 12);
+    this.input.on("change", (_e, cx) => {
+      text.text = this.input.value();
+      p.onChange(clone(this.shapes), cx);
+      cx.notify();
+    });
+    this.input.focus();
+  }
+
+  render() {
+    const t = theme();
+    return div().id("sketch-comment-editor").w(this.width).p(10).bg(t.popover)
+      .child(Textarea.new(this.input).w(this.width - 20).max_h(this.maxInputHeight).text_size(13).text_color(t.foreground));
   }
 }

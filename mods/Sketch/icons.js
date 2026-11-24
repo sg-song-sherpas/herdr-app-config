@@ -49,6 +49,23 @@ function cloudPoints(x, y, w, h) {
 }
 
 export const ICONS = {
+  diff: {
+    section: "system", label: "Diff", size: [560, 280], hint: "editable code changes, with added and removed lines",
+    draw(x, y, w, h) {
+      const header = h * 0.2;
+      return {
+        parts: [
+          { k: "poly", pts: box(x, y, w, h), closed: true },
+          { k: "poly", pts: [[x, y + header], [x + w, y + header]] },
+          { k: "poly", pts: [[x + w * 0.12, y + h * 0.45], [x + w * 0.27, y + h * 0.45]] },
+          { k: "poly", pts: [[x + w * 0.12, y + h * 0.73], [x + w * 0.27, y + h * 0.73]] },
+          { k: "poly", pts: [[x + w * 0.195, y + h * 0.6], [x + w * 0.195, y + h * 0.86]] },
+        ],
+        fill: [{ k: "poly", pts: box(x, y, w, h), closed: true }],
+        label: { x, y, w, h: header },
+      };
+    },
+  },
   person: {
     section: "system", label: "Person", size: [64, 84], hint: "a user, admin, team or customer",
     draw(x, y, w, h) {
@@ -68,6 +85,20 @@ export const ICONS = {
       const side = { k: "curve", pts: [[x, y + ry], ...arc(cx, y + h - ry, rx, ry, PI, 0), [x + w, y + ry]] };
       const outline = { k: "curve", pts: [...arc(cx, y + ry, rx, ry, PI, 2 * PI), ...arc(cx, y + h - ry, rx, ry, 0, PI)], closed: true };
       return { parts: [top, side], fill: [outline], label: { x, y: y + 2 * ry, w, h: h - 3 * ry } };
+    },
+  },
+  "db-table": {
+    section: "system", label: "DB Table", size: [220, 160], hint: "a database table with a title, rows and a key column",
+    draw(x, y, w, h) {
+      const header = h / 4, row = (h - header) / 3, key = w * 0.28;
+      const outline = { k: "poly", pts: box(x, y, w, h), closed: true };
+      const parts = [outline];
+      for (let i = 0; i < 3; i++) {
+        const ry = y + header + row * i;
+        parts.push({ k: "poly", pts: [[x, ry], [x + w, ry]] });
+      }
+      parts.push({ k: "poly", pts: [[x + key, y + header], [x + key, y + h]] });
+      return { parts, fill: [outline], label: { x, y, w, h: header } };
     },
   },
   server: {
@@ -143,6 +174,17 @@ export const ICONS = {
     },
   },
   // ---- notes and markers
+
+  popup: {
+    section: "notes", label: "Popup", size: [44, 44], hint: "a pin that opens a small editable sketch",
+    draw(x, y, w, h) {
+      const body = { k: "poly", pts: [[x, y], [x + w, y], [x + w, y + h * 0.75], [x + w * 0.4, y + h * 0.75], [x + w * 0.12, y + h], [x + w * 0.12, y + h * 0.75], [x, y + h * 0.75]], closed: true };
+      return {
+        parts: [body, ...[0.28, 0.5, 0.72].map((k) => ({ k: "ellipse", x: x + w * (k - 0.045), y: y + h * 0.31, w: w * 0.09, h: h * 0.09, solid: true }))],
+        fill: [body], label: "below",
+      };
+    },
+  },
 
   note: {
     section: "notes", label: "Note", size: [150, 130], hint: "a sticky note: a thought, a to-do", fill: "#fff3bf",

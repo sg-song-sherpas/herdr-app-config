@@ -33,3 +33,14 @@ test("leadPanes picks each tab's agent over its shell, ignoring mod panes", () =
   assert.equal(leads.get("t"), agent);
   assert.equal(leads.has("u"), false);
 });
+
+test("tabTitle removes agent prefixes and replaces imported issue boilerplate with the worktree task", () => {
+  const codex = { name: "Codex", key: "codex", agent: true };
+  assert.equal(tabTitle({ name: "Codex · 테스트 검증", named: true }, { program: codex }), "테스트 검증");
+  assert.equal(tabTitle({ name: "Codex · Linked Linear issue: PRD-10355", named: true }, { program: codex }, "PRD-10355 검색 오류 수정"), "검색 오류 수정");
+});
+
+test("sidebar and top tabs share identical title selection rules", async () => {
+  const { readFile } = await import("node:fs/promises");
+  assert.equal(await readFile(new URL("../../mods/spaces-agents/task-label.js", import.meta.url), "utf8"), await readFile(new URL("../../mods/tabs-linear/task-label.js", import.meta.url), "utf8"));
+});

@@ -8,19 +8,18 @@
 // the issue's branch from the basecamp checkout.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState } from "gpui-base";
+import { v_flex, h_flex } from "gpui-base";
 import { run, spaces, agents, layout, shared, setShared, theme, openOverlay, closeOverlay, props, home, nextCommand } from "herdr";
 import { gql, errorText, DETAIL_KEY, startedSteps, stateIcon, spacesFor, openUrl, iconButton,
-  MINE_KEY, STATES_KEY, STATE_FIELDS, ISSUE_FIELDS, fresh, statePicker, teamStates, setIssueState, shareState } from "./common.js";
+  MINE_KEY, STATES_KEY, ISSUE_FIELDS, fresh } from "./common.js";
 import { Detail } from "./detail.js";
-import { searchBar, sideNav, navState } from "./sidenav.js";
 
 const POLL_MS = 3 * 60 * 1000;
 const REPO = () => `${home()}/Sherpas/basecamp`;
 const QUERY = `{ viewer { assignedIssues(first: 250, orderBy: updatedAt,
   filter: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } }) {
   nodes { ${ISSUE_FIELDS} } } }
-  workflowStates(first: 250) { nodes { ${STATE_FIELDS} } } }`;
+  workflowStates(first: 250, filter: { type: { eq: "started" } }) { nodes { id position team { id } } } }`;
 // Workflow state types, most active first.
 const TYPE_RANK = { started: 0, unstarted: 1, backlog: 2, triage: 3 };
 const URGENCY = { blocked: 0, done: 1, working: 2, idle: 3 };
@@ -37,29 +36,6 @@ function find(node, id) {
   if (node?.id === id) return node;
   for (const c of node?.children ?? []) { const f = find(c, id); if (f) return f; }
   return null;
-}
-
-// A group's issues as a tree: each sub-issue right under its parent (when the
-// parent is in the same list), deeper levels further in. [{ issue, depth }], the
-// top level in the given order, each parent's sub-issues in the given order too.
-export function nest(items) {
-  const ids = new Set(items.map((i) => i.identifier));
-  const kids = new Map(), roots = [];
-  for (const i of items) {
-    const p = i.parent?.identifier;
-    if (p && p !== i.identifier && ids.has(p)) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(i); }
-    else roots.push(i);
-  }
-  const out = [], seen = new Set();
-  const visit = (i, depth) => {
-    if (seen.has(i.identifier)) return;
-    seen.add(i.identifier);
-    out.push({ issue: i, depth });
-    for (const k of kids.get(i.identifier) ?? []) visit(k, depth + 1);
-  };
-  for (const r of roots) visit(r, 0);
-  for (const i of items) visit(i, 0); // a parent loop: still listed once
-  return out;
 }
 
 export default class LinearIssues extends View {
@@ -80,19 +56,10 @@ export default class LinearIssues extends View {
     this.mode = load("mode", "project");
     this.backlog = load("backlog", false);
     this.folded = new Set(load("folded", []));
-    // By project: the project picked in the side nav ("*": all of them).
-    this.project = load("project", "*");
-    this.nav = navState(load("navWidth", 150));
-    this.term = "";
-    this.search = InputState.new({ placeholder: "Search issues (title or PRD-1234)" });
-    this.search.on("change", (_e, cx) => { this.term = this.search.value(); cx.notify(); });
     this.lastCommand = null;
-    // The issue whose status menu is open, and why the last status change failed.
-    this.picking = null;
-    this.stateError = null;
     // Start from the shared cache; fetch now only if it's older than a poll.
     this.adopt();
-    if (!fresh(shared(MINE_KEY), POLL_MS) || !shared(STATES_KEY)) this.refresh(cx);
+    if (!fresh(shared(MINE_KEY), POLL_MS)) this.refresh(cx);
     cx.timer.every(POLL_MS, (cx) => this.refresh(cx));
     // Commands for keys and scripts (herdr-app do linear-issues.<command>):
     // refresh, go:<ID> (its space, else Linear), detail:<ID>, web:<ID>, worktree:<ID>.
@@ -116,33 +83,6 @@ export default class LinearIssues extends View {
     else if (name === "detail") this.showDetail(issue);
     else if (name === "web") this.web(issue);
     else if (name === "worktree") this.newWorktree(issue);
-  }
-
-  // Moves the issue to `state`: shown at once, sent to Linear, put back if it refuses.
-  pickState(issue, state, cx) {
-    this.picking = null;
-    const before = issue.state;
-    if (state.id === before.id) return cx.notify();
-    this.stateError = null;
-    this.patch(issue.identifier, state);
-    cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        const now = await setIssueState(issue, state);
-        this.patch(issue.identifier, now);
-        shareState(issue.identifier, now);
-        this.fetchedAt = Math.max(this.fetchedAt ?? 0, shared(MINE_KEY)?.at ?? 0);
-      } catch (e) {
-        this.patch(issue.identifier, before);
-        this.stateError = `Couldn't change ${issue.identifier}: ${errorText(e)}`;
-      } finally {
-        cx.notify();
-      }
-    });
-  }
-
-  patch(identifier, state) {
-    this.issues = this.issues.map((i) => (i.identifier === identifier ? { ...i, state } : i));
   }
 
   web(issue) {
@@ -189,11 +129,8 @@ export default class LinearIssues extends View {
     if (states?.nodes) this.steps = startedSteps(states.nodes);
   }
 
-  // The issues shown: Backlog only when asked, and only those the search matches.
   shown() {
-    const q = this.term.trim().toLowerCase();
-    return this.issues.filter((i) => this.backlog || i.state.type !== "backlog")
-      .filter((i) => !q || i.identifier.toLowerCase().includes(q) || i.title.toLowerCase().includes(q));
+    return this.backlog ? this.issues : this.issues.filter((i) => i.state.type !== "backlog");
   }
 
   // [{ key, name, items }]: by workflow state, or by project with each project's
@@ -234,8 +171,8 @@ export default class LinearIssues extends View {
 
   newWorktree(issue) {
     openOverlay({
-      mod: "worktree", kind: "dialog", width: 440, height: 260,
-      props: { folder: REPO(), action: "new", branch: issue.branchName },
+      mod: "worktree-codex", kind: "dialog", width: 460, height: 360,
+      props: { folder: REPO(), action: "new", issue: { identifier: issue.identifier, title: issue.title, branchName: issue.branchName } },
     });
   }
 
@@ -273,33 +210,20 @@ export default class LinearIssues extends View {
   }
 
 
-  // `depth`: how far down its parent's tree (0: top). A sub-issue whose parent
-  // isn't listed names it instead (↑ PRD-9961), and the name opens the parent.
-  row(t, issue, all, depth = 0) {
+  row(t, issue, all, nested) {
     const matched = spacesFor(issue.identifier, all);
-    const parent = depth === 0 ? issue.parent : null;
     const list = this.agentsFor(matched);
     const top = list[0]?.status ?? null;
     // A gutter mark on the row's edge: the agent's status color, faint for a space alone.
     const gutter = !matched.length ? "#00000000" : top && top !== "idle" ? t[top] ?? t.dim : t.border;
-    return h_flex().id(`li-${issue.identifier}`).w_full().h(30).flex_none().pl(2 + depth * 16).pr(8).gap(7).items_center()
+    return h_flex().id(`li-${issue.identifier}`).w_full().h(30).flex_none().pl(nested ? 16 : 2).pr(8).gap(7).items_center()
       .rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
       .when(shared(DETAIL_KEY) === issue.identifier, (el) => el.bg(t.selected))
       .on_click(() => this.showDetail(issue))
-      .when(depth > 0, (el) => el.child(div().w(8).h(15).mt(-14).ml(-4).flex_none().border_l(1).border_b(1).border_color(t.border).rounded_bl(4)))
       .child(div().w(3).h(18).flex_none().rounded(2).bg(gutter))
-      .child(statePicker(t, { id: `li-state-${issue.identifier}`, state: issue.state, steps: this.steps,
-        states: this.picking === issue.identifier ? teamStates(shared(STATES_KEY)?.nodes, issue.team?.key) : [],
-        open: this.picking === issue.identifier,
-        onOpen: (o, cx) => { this.picking = o ? issue.identifier : null; cx.notify(); },
-        onPick: (s, cx) => this.pickState(issue, s, cx) }))
+      .child(stateIcon(issue.state, this.steps))
       .child(div().w(70).flex_none().text_size(11).text_color(t.muted).child(issue.identifier))
       .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(issue.title))
-      .when(Boolean(parent), (el) => el.child(div().id(`li-parent-${issue.identifier}`).flex_none().px(5).rounded(4)
-        .text_size(10).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .tooltip(`${parent.identifier} ${parent.title ?? ""}`.trim())
-        .on_click((_e, cx) => { cx.stop_propagation(); this.showDetail(parent); })
-        .child(`↑ ${parent.identifier}`)))
       .when(matched.length > 0, (el) => el.child(this.agentChip(t, issue, matched, list)))
       .when(matched.length === 0 && Boolean(issue.branchName), (el) =>
         el.child(iconButton(t, `li-wt-${issue.identifier}`, "+", () => this.newWorktree(issue))));
@@ -350,53 +274,21 @@ export default class LinearIssues extends View {
         .child(this.chip(t, "li-backlog", "Backlog", this.backlog, () => { this.backlog = !this.backlog; save("backlog", this.backlog); })))
       .when(Boolean(this.error), (el) => el.child(div().px(14).py(8).text_size(12).text_color(t.ansi1)
         .child(`Couldn't load: ${this.error}`)))
-      .when(Boolean(this.stateError), (el) => el.child(h_flex().px(14).py(6).gap(8).items_center().text_size(12).text_color(t.ansi1)
-        .child(div().flex_1().min_w(0).child(this.stateError))
-        .child(iconButton(t, "li-state-error-close", "✕", (cx) => { this.stateError = null; cx.notify(); }))))
-      .child(searchBar(t, this.search))
-      .child(this.mode === "project" ? this.byProject(t, all, groups) : this.list(t, all, groups));
-  }
-
-  empty(t) {
-    return div().p(10).text_color(t.dim).child(this.term.trim() ? "Nothing matches." : "No open issues assigned to you.");
-  }
-
-  // By state: a group per state, each folding.
-  list(t, all, groups) {
-    return v_flex().id("li-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-      .when(!this.loading && !this.error && groups.length === 0, (el) => el.child(this.empty(t)))
-      .children(groups.flatMap((g) => {
-        const folded = this.folded.has(g.key);
-        const head = h_flex().id(`lg-${g.key}`).h(28).flex_none().px(8).gap(7).items_center().rounded(6)
-          .cursor_pointer().hover((s) => s.bg(t.hover)).text_size(11).font_semibold().text_color(t.muted)
-          .on_click((_e, cx) => this.toggle(g.key, cx))
-          .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim))
-          .child(div().flex_1().min_w(0).truncate().child(g.name))
-          .child(this.summary(t, g, all))
-          .child(div().flex_none().text_size(10).font_normal().text_color(t.dim).child(String(g.items.length)));
-        return folded ? [head] : [head, ...nest(g.items).map(({ issue, depth }) => this.row(t, issue, all, depth))];
-      }));
-  }
-
-  // By project: a side nav (All, then each project) beside the picked one's
-  // issues. All shows every issue under its project's name.
-  byProject(t, all, groups) {
-    const picked = groups.some((g) => g.name === this.project) ? this.project : "*";
-    const show = picked === "*" ? groups : groups.filter((g) => g.name === picked);
-    const body = v_flex().id("li-list").size_full().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-      .when(!this.loading && !this.error && show.length === 0, (el) => el.child(this.empty(t)))
-      .children(show.flatMap((g) => [
-        ...(picked === "*" ? [h_flex().id(`li-sub-${g.name}`).h(26).flex_none().px(8).gap(7).items_center()
-          .text_size(11).font_semibold().text_color(t.muted)
-          .child(div().flex_1().min_w(0).truncate().child(g.name))
-          .child(this.summary(t, g, all))
-          .child(div().flex_none().text_size(10).font_normal().text_color(t.dim).child(String(g.items.length)))] : []),
-        ...nest(g.items).map(({ issue, depth }) => this.row(t, issue, all, depth)),
-      ]));
-    return sideNav(t, {
-      id: "li-nav", picked, body, state: this.nav, onResized: (w) => save("navWidth", w),
-      entries: [{ key: "*", label: "All", count: this.shown().length }, ...groups.map((g) => ({ key: g.name, label: g.name, count: g.items.length }))],
-      onPick: (key) => { this.project = key; save("project", key); },
-    });
+      .child(v_flex().id("li-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
+        .when(!this.loading && !this.error && this.issues.length === 0, (el) =>
+          el.child(div().p(10).text_color(t.dim).child("No open issues assigned to you.")))
+        .children(groups.flatMap((g) => {
+          const folded = this.folded.has(g.key);
+          const nested = this.mode === "project";
+          const head = h_flex().id(`lg-${g.key}`).h(28).flex_none().px(8).gap(7).items_center().rounded(6)
+            .cursor_pointer().hover((s) => s.bg(t.hover)).text_size(nested ? 12 : 11).font_semibold()
+            .text_color(nested ? t.foreground : t.muted)
+            .on_click((_e, cx) => this.toggle(g.key, cx))
+            .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim))
+            .child(div().flex_1().min_w(0).truncate().child(g.name))
+            .child(this.summary(t, g, all))
+            .child(div().flex_none().text_size(10).font_normal().text_color(t.dim).child(String(g.items.length)));
+          return folded ? [head] : [head, ...g.items.map((i) => this.row(t, i, all, nested))];
+        })));
   }
 }
